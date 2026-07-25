@@ -3,19 +3,31 @@ import sys
 from colors import CYAN, RED, GRN, WHT, DIM, RST
 from banner import banner
 from cloner import clone_repo, list_repos, delete_repo, delete_all_repos, repo_exists, repo_path
+from detector import detect_project_types, show_detected_types
 from help import show_help
 
 def cmd_clone(url):
-    if clone_repo(url):
-        print(f"  {GRN}[+]{RST} ready.")
-    else:
-        sys.exit(1)
+    repo_name = clone_repo(url)
+    if not repo_name:
+        return False
+
+    target = repo_path(repo_name)
+    print(f"  {DIM}[*]{RST} switched to {WHT}{target}{RST}")
+    print()
+    types = detect_project_types(target)
+    show_detected_types(repo_name, types)
+    return True
 
 def cmd_scan(name):
     if not repo_exists(name):
         print(f"  {RED}[-]{RST} {WHT}{name}{RST} not found in clones/. clone it first.")
         return
-    print(f"  {DIM}[*]{RST} scanning {WHT}{name}{RST}...")
+    target = repo_path(name)
+    print(f"  {DIM}[*]{RST} switched to {WHT}{target}{RST}")
+    print()
+    types = detect_project_types(target)
+    show_detected_types(name, types)
+    print()
     print(f"  {DIM}[*]{RST} scanner not yet implemented — coming in Phase 2.")
 
 def cmd_delete(args):
@@ -59,7 +71,9 @@ def interactive():
             cmd_delete(parts[1:])
             continue
 
-        cmd_clone(line)
+        if not cmd_clone(line):
+            print()
+            continue
 
         print()
 
@@ -75,24 +89,18 @@ def main():
 
         if arg == "list":
             list_repos()
-            sys.exit(0)
-
-        if arg == "scan":
+        elif arg == "scan":
             if len(sys.argv) < 3:
                 print(f"  {RED}[-]{RST} usage: ultron scan <repo-name>")
-                sys.exit(1)
-            cmd_scan(sys.argv[2])
-            sys.exit(0)
-
-        if arg == "delete":
+            else:
+                cmd_scan(sys.argv[2])
+        elif arg == "delete":
             if len(sys.argv) < 3:
                 print(f"  {RED}[-]{RST} usage: ultron delete <repo-name> or ultron delete --all")
-                sys.exit(1)
-            cmd_delete(sys.argv[2:])
-            sys.exit(0)
-
-        cmd_clone(arg)
-        return
+            else:
+                cmd_delete(sys.argv[2:])
+        else:
+            cmd_clone(arg)
 
     interactive()
 

@@ -39,9 +39,11 @@ def clone_repo(repo_url):
         print(f"  {DIM}[*] {WHT}{repo_name}{RST} {DIM}already exists locally.{RST}")
         answer = input(f"  {CYAN}[~]{RST} pull latest changes and continue? [{GRN}Y{RST}/{RED}n{RST}] ").strip().lower()
         if answer in ("", "y", "yes"):
-            return pull_repo(target_dir)
+            if pull_repo(target_dir):
+                return repo_name
+            return None
         print(f"  {DIM}[*] using existing local copy.{RST}")
-        return True
+        return repo_name
 
     print()
     print(f"  {DIM}[*] resolving target  -> {WHT}{repo_url}{RST}")
@@ -56,10 +58,10 @@ def clone_repo(repo_url):
     print()
     if result.returncode == 0:
         print(f"  {GRN}[+]{RST} {WHT}repository acquired successfully.{RST}")
-        return True
+        return repo_name
     else:
         print(f"  {RED}[-]{RST} {WHT}clone operation failed (exit code {result.returncode}){RST}")
-        return False
+        return None
 
 def list_repos():
     if not os.path.isdir(CLONES_DIR):
