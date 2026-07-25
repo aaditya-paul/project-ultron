@@ -955,12 +955,25 @@ def run_llm_general_scan(target_path, security_graph, global_memory, detector_cl
 
     file_list = []
     fn_boundaries = {}
+    has_ir = bool(ir_modules)
     if ir_modules:
         file_list = [mod.file_path for mod in ir_modules]
         fn_boundaries = _build_function_boundaries(ir_modules)
 
+    # When no IR modules, walk the directory to provide a real file list
+    if not file_list:
+        for root, _, files in os.walk(target_path):
+            for file in files:
+                rel = os.path.relpath(os.path.join(root, file), target_path)
+                if rel.startswith(".") or rel.startswith("node_modules") or "\\." in rel or "/." in rel:
+                    continue
+                file_list.append(rel)
+
     auth_info = subgraphs.get("auth", {})
     unprotected_routes = [r["route"] for r in auth_info.get("unprotected", []) if isinstance(r, dict)]
+
+    read_fn_available = "2. Read a function definition from the IR index:\n{{\"action\": \"READ_FUNCTION\", \"name\": \"function_name\"}}" if has_ir else ""
+    read_fn_hint = "Use READ_FILE to inspect source files directly." if not has_ir else ""
 
     prompt = f"""You are an agentic security code auditor.
 No automatic taint propagation paths were found by the static analysis engine,
@@ -978,7 +991,7 @@ PROJECT METADATA:
 {("- Database operations: " + json.dumps(subgraphs.get("database", {}).get("operations", [])[:10], indent=2)) if subgraphs.get("database", {}).get("operations") else ""}
 
 FILES IN PROJECT:
-{json.dumps(file_list[:60], indent=2) if file_list else "N/A"}
+{json.dumps(file_list[:80], indent=2) if file_list else "N/A"}
 
 {global_memory.to_string()}
 
@@ -987,10 +1000,7 @@ You can perform one action per turn by returning a JSON block matching one of th
 
 1. Read a specific file to inspect logic/validation:
 {{"action": "READ_FILE", "path": "path/to/file", "start_line": 1, "end_line": 50}}
-
-2. Read a function definition from the IR index:
-{{"action": "READ_FUNCTION", "name": "function_name"}}
-
+{read_fn_available}
 3. Add a persistent security-relevant fact to Global Memory:
 {{"action": "RECORD_FACT", "fact": "Description of the fact (e.g. function validateEmail() uses regex)"}}
 
@@ -1001,7 +1011,7 @@ You can perform one action per turn by returning a JSON block matching one of th
     {{
       "rule": "xss",
       "severity": "high",
-      "title": "Stored XSS in comment submission",
+      "title": "A concise title",
       "description": "Detailed description of the vulnerability and where it occurs, including file paths and line numbers you verified",
       "source": "Attack vector or entry point (e.g. HTTP request body)",
       "sink": "Vulnerable operation or endpoint (e.g. res.send() with unsanitized input)",
@@ -1012,6 +1022,7 @@ You can perform one action per turn by returning a JSON block matching one of th
 }}
 
 CRITICAL RULES:
+- Use the FILE LIST above to choose files to read. Start with entry-point files (routes, controllers, handlers).
 - Actually READ the relevant files to verify each vulnerability before reporting it!
 - Do NOT guess or speculate — only report issues you have confirmed by reading code.
 - If you cannot confirm any vulnerability, return {{"action": "FINISH", "findings": []}}.

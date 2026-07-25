@@ -46,9 +46,10 @@ Requires Python 3.10+, system `git`, and [Graphviz](https://graphviz.org/downloa
 | **🔬 AST → IR Pipeline** | Tree-sitter parsing → normalized IR with provenance edges, semantic tags, and cross-file call resolution |
 | **🕸️ Taint Engine** | Backward propagation through provenance edges — inter-procedural, sanitizer-aware, deduplicated |
 | **🔐 Security Graph** | Source→validation→sink flow chains + Auth / Database / Network subgraphs |
-| **🤖 LLM Detector** | Optional LLM verification on taint flows — prompt-optimized, pre-filtered, cached |
+| **🤖 LLM Detector** | Optional LLM verification on taint flows — agentic (READ_FILE/READ_FUNCTION/FINISH), with automatic general scan fallback when no taint paths are found |
 | **☁️ Cloud LLM** | Groq / Gemini / NVIDIA with automatic fallback, rate limiting, and retry |
 | **📊 Visualizations** | Auto-generated SVGs: dependency graph, taint propagation, security analysis |
+| **🕵️ Zero-Flow General Scan** | When the taint engine finds no propagation paths, LLM falls back to an agentic codebase exploration — reads files, inspects functions, and reports vulnerabilities the static engine missed |
 | **📦 Zero config** | Works out of the box with local Ollama/llama.cpp — just `pip install` and run |
 
 ---
@@ -226,7 +227,7 @@ Tree-sitter walks all detected languages, extracting functions, classes, imports
 
 ### Phase 3 — Detection
 - **Rules Engine** — deterministic pre-LLM checks: missing auth, unvalidated flows, DB writes without validation
-- **LLM Detector** — takes candidate taint paths, extracts relevant code sections (80–95% token reduction), pre-filters safe flows, then checks with an LLM. Retries on malformed JSON. Results cached per session.
+- **LLM Detector** — takes candidate taint paths, extracts relevant code sections (80–95% token reduction), pre-filters safe flows, then checks with an LLM using an agentic loop (READ_FILE, READ_FUNCTION, RECORD_FACT, FINISH). When no taint paths are found, falls back to an **agentic general scan** that explores the codebase independently — reading files, inspecting functions, and returning confirmed findings backed by source evidence rather than speculative warnings. Retries on malformed JSON. Results cached per session.
 
 ---
 
