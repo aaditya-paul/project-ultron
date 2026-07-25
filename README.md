@@ -81,15 +81,27 @@ Requires Python 3.10+, system `git`, and [Graphviz](https://graphviz.org/downloa
 | `--no-llm` | Skip LLM detection entirely (deterministic rules only) |
 | `--mode local` / `--mode cloud` | Override LLM mode for a single command |
 
-### Pre-Commit Security Hook Integration
+### Pre-Commit Security Hook Integration (Project-Specific & Disabled by Default)
 
-Enforce automated security verification and optional auto-remediation before every `git commit`:
+Git pre-commit scanning is **disabled by default** and **project-specific** (only affects the targeted repository where installed).
 
-Run in terminal:
-```bash
-python ultron.py install-hook .
-```
-Or ask your AI assistant: *"Install the Ultron pre-commit hook."*
+#### To Enable on a Project:
+- **Via CLI**: `python ultron.py install-hook .`
+- **Via AI Assistant**: Ask *"Install the Ultron pre-commit hook."*
+
+#### 5 Ways to Disable or Bypass Commit Verification:
+
+1. **CLI Uninstall**: Run `python ultron.py uninstall-hook .` (or `ultron remove-hook .`).
+2. **MCP Tool Uninstall**: Ask your AI Assistant to call `ultron_remove_git_hook(target_dir=".")`.
+3. **One-Time Git Bypass**: Add `--no-verify` (or `-n`) when committing:
+   ```bash
+   git commit --no-verify -m "commit message"
+   ```
+4. **Environment Variable Bypass**: Set `ULTRON_DISABLE_HOOK=1` before committing:
+   ```bash
+   ULTRON_DISABLE_HOOK=1 git commit -m "commit message"
+   ```
+5. **Manual Removal**: Delete `.git/hooks/pre-commit` inside your target project directory.
 
 ### Model Context Protocol (MCP) Integration
 

@@ -96,7 +96,7 @@ def ultron_auto_fix(target_dir: str = ".") -> str:
 
 @mcp.tool()
 def ultron_install_git_hook(target_dir: str = ".", auto_fix: bool = True) -> str:
-    """Install built-in Git pre-commit security hook in the target codebase directory.
+    """Install project-specific Git pre-commit security hook in the target codebase directory.
     When installed, Git automatically runs Ultron security verification and LLM auto-fixing before every commit.
     """
     from ultron import install_git_hook
@@ -106,6 +106,18 @@ def ultron_install_git_hook(target_dir: str = ".", auto_fix: bool = True) -> str
         "message": message,
         "target_directory": os.path.abspath(target_dir),
         "auto_fix_enabled": auto_fix
+    }, indent=2)
+
+
+@mcp.tool()
+def ultron_remove_git_hook(target_dir: str = ".") -> str:
+    """Uninstall/remove the project-specific Git pre-commit security hook from the target codebase directory."""
+    from ultron import uninstall_git_hook
+    ok, message = uninstall_git_hook(target_dir)
+    return json.dumps({
+        "success": ok,
+        "message": message,
+        "target_directory": os.path.abspath(target_dir)
     }, indent=2)
 
 

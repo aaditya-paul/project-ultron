@@ -313,7 +313,7 @@ def cmd_scan(name):
 
 
 def install_git_hook(target_dir: str = ".", auto_fix: bool = True) -> tuple[bool, str]:
-    """Install Git pre-commit security hook in the target repository."""
+    """Install Git pre-commit security hook in the target repository (project specific, disabled by default)."""
     abs_dir = os.path.abspath(target_dir)
     git_dir = os.path.join(abs_dir, ".git")
     if not os.path.isdir(git_dir):
@@ -327,9 +327,14 @@ def install_git_hook(target_dir: str = ".", auto_fix: bool = True) -> tuple[bool
     fix_flag = " --fix" if auto_fix else ""
 
     hook_content = f"""#!/bin/sh
-# Ultron Automated Pre-Commit Security Hook
+# Ultron Project-Specific Pre-Commit Security Hook
+if [ "$ULTRON_DISABLE_HOOK" = "1" ] || [ "$ULTRON_SKIP_HOOK" = "1" ]; then
+    echo "ℹ️  [Ultron] Pre-commit hook bypassed via environment variable."
+    exit 0
+fi
+
 echo "--------------------------------------------------------"
-echo " 🔒 [Ultron] Running pre-commit security verification..."
+echo " 🔒 [Ultron] Running project-specific pre-commit security verification..."
 echo "--------------------------------------------------------"
 
 python "{ultron_cli_path}" scan .{fix_flag}
@@ -337,6 +342,8 @@ python "{ultron_cli_path}" scan .{fix_flag}
 ULTRON_EXIT_CODE=$?
 if [ $ULTRON_EXIT_CODE -ne 0 ]; then
     echo "❌ [Ultron Gate Failed] Security issues found in commit."
+    echo "   To bypass this check once, run: git commit --no-verify"
+    echo "   To remove hook permanently, run: python ultron.py uninstall-hook ."
     exit 1
 fi
 
@@ -350,9 +357,22 @@ exit 0
             os.chmod(hook_file, 0o755)
         except Exception:
             pass
-        return True, f"Installed Git pre-commit hook in {hook_file} (auto_fix={auto_fix})"
+        return True, f"Installed project-specific Git pre-commit hook in {hook_file} (auto_fix={auto_fix})"
     except Exception as e:
         return False, f"Failed to install hook: {e}"
+
+
+def uninstall_git_hook(target_dir: str = ".") -> tuple[bool, str]:
+    """Uninstall/remove Git pre-commit security hook from the project."""
+    abs_dir = os.path.abspath(target_dir)
+    hook_file = os.path.join(abs_dir, ".git", "hooks", "pre-commit")
+    if os.path.isfile(hook_file):
+        try:
+            os.remove(hook_file)
+            return True, f"Removed project-specific Git pre-commit hook from {hook_file}"
+        except Exception as e:
+            return False, f"Failed to remove hook file: {e}"
+    return True, f"No Git pre-commit hook found in {abs_dir}"
 
 
 def cmd_visualise(name):
@@ -698,7 +718,7 @@ def main():
 
     banner()
 
-    valid_cmds = {"list", "scan", "config", "delete", "visualise", "visualize", "install-hook", "hook", "--help", "-h", "help"}
+    valid_cmds = {"list", "scan", "config", "delete", "visualise", "visualize", "install-hook", "uninstall-hook", "remove-hook", "hook", "--help", "-h", "help"}
     if len(sys.argv) > 1:
         arg = sys.argv[1]
         if arg.startswith("--") and arg not in valid_cmds:
@@ -710,6 +730,14 @@ def main():
         if arg in ("install-hook", "hook"):
             target_dir = sys.argv[2] if len(sys.argv) > 2 else "."
             ok, msg = install_git_hook(target_dir, auto_fix=("--no-fix" not in sys.argv))
+            if ok:
+                print(f"  {GRN}[+]{RST} {msg}")
+            else:
+                print(f"  {RED}[-]{RST} {msg}")
+            sys.exit(0)
+        if arg in ("uninstall-hook", "remove-hook"):
+            target_dir = sys.argv[2] if len(sys.argv) > 2 else "."
+            ok, msg = uninstall_git_hook(target_dir)
             if ok:
                 print(f"  {GRN}[+]{RST} {msg}")
             else:
