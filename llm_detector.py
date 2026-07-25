@@ -314,8 +314,8 @@ def _is_trivially_safe(flow):
     if source.startswith(TRIVIALLY_SAFE_SOURCE_PREFIXES):
         return True
 
-    # If source is from session or environment (not attacker-controlled)
-    if source in ("SOURCE_SESSION", "SOURCE_ENV"):
+    # If source is from session (authenticated context)
+    if source == "SOURCE_SESSION":
         return True
 
     # If path has coercion + no interesting sink (like DB query), skip
@@ -538,6 +538,7 @@ You can perform one action per turn by returning a JSON block matching one of th
 }}
 
 CRITICAL RULES:
+- FAST-PATH: If the provided code context is sufficient to determine vulnerability or safety, return FINISH immediately on your FIRST response!
 - Trace the actual data flow step-by-step through the business logic.
 - Look for sanitizers, type-checks, or route-level middleware validations.
 - Do NOT assume sanitization exists unless you have explicitly read and verified the sanitization/validation code!
@@ -827,6 +828,8 @@ Output ONLY valid JSON. No conversational markdown, no code blocks."""
                     "source": f.get("source", ""),
                     "sink": f.get("sink", ""),
                     "path": f.get("path_labels", []),
+                    "file": f.get("file", ""),
+                    "line": f.get("line", 0),
                     "recommendation": verdict.get("recommendation", "Review the flow manually."),
                 }
                 new_findings.append(finding)
@@ -868,16 +871,31 @@ def run_llm_detection(repo_name, security_graph, detector_client, ir_modules=Non
 
     total = len(flows)
     skipped = 0
-    print(f"  {CYAN}[*]{RST} running agentic LLM vulnerability analysis on {total} taint flow path(s)...")
+
+    try:
+        from ultron import load_config
+        config = load_config()
+    except Exception:
+        config = {}
+    max_workers = config.get("llm_max_workers", 5)
+
+    import concurrent.futures
+    import threading
+    lock = threading.Lock()
+
+    print(f"  {CYAN}[*]{RST} running agentic LLM vulnerability analysis on {total} taint flow path(s) ({max_workers} parallel workers)...")
 
     processed_flows = []
+    flows_to_analyze = []
+    seen_signatures = {}
 
     for flow in flows:
         flow_id = flow.get("id", "flow")
         source = flow.get("source", "")
         sink = flow.get("sink", "")
         sink_type = flow.get("sink_type", "")
-        path_labels = flow.get("path_labels", [])
+        fpath = flow.get("file", "")
+        fline = flow.get("line", 0)
 
         # --- Pre-filter: skip trivially safe flows ---
         if _is_trivially_safe(flow):
@@ -888,18 +906,34 @@ def run_llm_detection(repo_name, security_graph, detector_client, ir_modules=Non
 
         processed_flows.append(flow)
 
-        # --- Check in-memory detector cache ---
-        cache_key = _flow_cache_key(flow, getattr(detector_client, 'model', 'unknown'), getattr(detector_client, 'temperature', 0.1))
-        if cache_key in _detector_cache:
-            cached = _detector_cache[cache_key]
-            if cached.get("vulnerable", False):
-                findings.append(cached)
-                print(f"    {RED}[!] cached vulnerability: {cached.get('title', 'Unknown')} ({cached.get('severity', 'high').upper()}){RST}")
-            else:
-                print(f"    {GRN}[+] cached flow {flow_id}: marked safe{RST}")
+        # --- Deduplication by flow signature ---
+        sig = (source, sink, fpath, fline)
+        if sig in seen_signatures:
+            if verbose:
+                print(f"    {DIM}[-] flow {flow_id}: skipped duplicate signature {sig}{RST}")
             continue
+        seen_signatures[sig] = flow
+        flows_to_analyze.append(flow)
 
-        # --- Run Agentic flow analysis ---
+    def analyze_single_flow(flow):
+        nonlocal findings
+        flow_id = flow.get("id", "flow")
+        source = flow.get("source", "")
+        sink = flow.get("sink", "")
+        path_labels = flow.get("path_labels", [])
+
+        cache_key = _flow_cache_key(flow, getattr(detector_client, 'model', 'unknown'), getattr(detector_client, 'temperature', 0.1))
+
+        with lock:
+            if cache_key in _detector_cache:
+                cached = _detector_cache[cache_key]
+                if cached.get("vulnerable", False):
+                    findings.append(cached)
+                    print(f"    {RED}[!] cached vulnerability: {cached.get('title', 'Unknown')} ({cached.get('severity', 'high').upper()}){RST}")
+                else:
+                    print(f"    {GRN}[+] cached flow {flow_id}: marked safe{RST}")
+                return
+
         print(f"    [*] analyzing flow {flow_id} ({source} -> {sink}) using agentic flow trace...")
         result = run_agentic_flow_analysis(
             target_path=target_path,
@@ -929,22 +963,32 @@ def run_llm_detection(repo_name, security_graph, detector_client, ir_modules=Non
                 "source": source,
                 "sink": sink,
                 "path": path_labels,
+                "file": flow.get("file", ""),
+                "line": flow.get("line", 0),
                 "recommendation": recommendation,
             }
-            findings.append(finding)
-            _detector_cache[cache_key] = finding
-            print(f"    {RED}[!] confirmed vulnerability: {vuln_type} ({severity.upper()}){RST}")
+            with lock:
+                findings.append(finding)
+                _detector_cache[cache_key] = finding
+                print(f"    {RED}[!] confirmed vulnerability: {vuln_type} ({severity.upper()}){RST}")
         else:
-            _detector_cache[cache_key] = {"vulnerable": False}
-            print(f"    {GRN}[+] analyzed flow {flow_id}: marked safe (false positive or sanitised){RST}")
+            with lock:
+                _detector_cache[cache_key] = {"vulnerable": False}
+                print(f"    {GRN}[+] analyzed flow {flow_id}: marked safe (false positive or sanitised){RST}")
 
-        _save_llm_findings(repo_name, security_graph, findings)
+        with lock:
+            _save_llm_findings(repo_name, security_graph, findings)
+
+    # Execute flow analysis concurrently using ThreadPoolExecutor
+    if flows_to_analyze:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            list(executor.map(analyze_single_flow, flows_to_analyze))
 
     if skipped:
         print(f"  {DIM}[*] skipped {skipped}/{total} trivially safe flow(s) (saved LLM calls){RST}")
 
-    # Run consistency reconciliation on all candidate flows that passed pre-filtering
-    if processed_flows:
+    # Run consistency reconciliation on candidate flows if there are multiple flows to reconcile
+    if processed_flows and len(processed_flows) > 3:
         findings = run_consistency_reconciliation(findings, processed_flows, global_memory, detector_client, verbose)
         
         # Sync back cache to match final reconciled decisions

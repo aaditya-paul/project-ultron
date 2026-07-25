@@ -26,14 +26,20 @@ except ImportError:
 # ── Sink/source patterns ───────────────────────────────────────────────────
 
 SINK_PATTERNS = {
-    "exec", "spawn", "popen", "system", "fork", "execSync", "execFile",
+    "exec", "spawn", "popen", "system", "fork", "execSync", "execFile", "eval",
     "prisma.*", "query", "findUnique", "findMany", "create", "update", "delete", "upsert",
-    "$executeRawUnsafe", "$transaction", "createMany", "updateMany",
-    "writeFile", "writeFileSync", "readFile", "unlink", "appendFile",
-    "fetch", "axios.*", "http.request", "https.request", "got.*",
+    "$executeRawUnsafe", "$queryRawUnsafe", "$transaction", "createMany", "updateMany",
+    "sequelize.query", "queryresulttojson", "sql.raw", "raw", "executesql", "$where", "mapreduce",
+    "writeFile", "writeFileSync", "readFile", "readFileSync", "unlink", "appendFile",
+    "sendfile", "download", "createreadstream", "createwritestream",
+    "send", "write", "render", "dangerouslysetinnerhtml", "innerhtml", "outerhtml", "document.write",
+    "fetch", "axios.*", "http.request", "https.request", "got.*", "undici.*", "redirect", "permanentredirect",
 }
 
-SOURCE_ROOTS = {"req", "request", "event", "ctx", "payload", "input", "body"}
+SOURCE_ROOTS = {
+    "req", "request", "event", "ctx", "c", "payload", "input", "body", "query", "params",
+    "headers", "cookies", "searchparams", "msg", "props", "url", "astro", "nexturl"
+}
 
 # Convention-based heuristics: detect operations by method/function shape, not by exhaustive lists.
 # These patterns describe what the code DOES, not whether it's safe.
@@ -87,9 +93,11 @@ class JsTsExtractor:
 
         mod = IRModule(file_path=file_path, language=language, functions=[])
 
-        for child in root.named_children:
-            fn = self._extract_root_fn(child, source_bytes, file_path)
-            if fn:
+        all_fns = self._collect_all_functions_from_node(root, source_bytes, file_path)
+        seen_ids = set()
+        for fn in all_fns:
+            if fn.id not in seen_ids:
+                seen_ids.add(fn.id)
                 mod.functions.append(fn)
 
         # Post-processing passes
@@ -98,49 +106,63 @@ class JsTsExtractor:
 
         return mod
 
-    # ── Root-level dispatch ────────────────────────────────────────────────
+    def _collect_all_functions_from_node(self, root_node, source_bytes, file_path) -> list[IRFunction]:
+        """Collect all function definitions (outer, inner, higher-order, exported) in O(N) linear pass."""
+        functions = []
+        if root_node is None:
+            return functions
 
-    def _extract_root_fn(self, node, source_bytes, file_path):
-        """Extract a function from a root-level node, unwrapping exports."""
-        t = node.type
+        stack = [root_node]
+        fn_nodes = []
+        while stack:
+            curr = stack.pop()
+            t = curr.type
+            if t in ("function_declaration", "method_definition", "arrow_function", "function"):
+                fn_nodes.append(curr)
+            for child in reversed(curr.named_children):
+                stack.append(child)
 
-        # export function / export default function / export async function
-        if t == "export_statement":
-            for child in node.named_children:
-                result = self._extract_root_fn(child, source_bytes, file_path)
-                if result:
-                    return result
-            return None
+        for node in fn_nodes:
+            fn_name = ""
+            t = node.type
+            if t in ("function_declaration", "method_definition"):
+                name_node = node.child_by_field_name("name")
+                if name_node:
+                    fn_name = self._node_text(name_node, source_bytes)
 
-        # export default class { method() {} }
-        if t == "lexical_declaration" or t == "variable_declaration":
-            stmts = self._extract_lexical_declaration(node, source_bytes, file_path)
-            for s in stmts:
-                if isinstance(s, IRFunction):
-                    return s
-            return None
+            if not fn_name or fn_name == "<anonymous>":
+                parent = node.parent
+                if parent and parent.type == "variable_declarator":
+                    n_node = parent.child_by_field_name("name")
+                    if n_node:
+                        fn_name = self._node_text(n_node, source_bytes)
+                elif parent and parent.type == "assignment_expression":
+                    left_node = parent.child_by_field_name("left")
+                    if left_node:
+                        fn_name = self._node_text(left_node, source_bytes)
+                elif parent and parent.type == "pair":
+                    key_node = parent.child_by_field_name("key")
+                    if key_node:
+                        fn_name = self._node_text(key_node, source_bytes)
+                elif parent and parent.type == "export_statement":
+                    fn_name = "default"
 
-        if t == "expression_statement":
-            expr = node.named_children[0] if node.named_children else None
-            if expr and expr.type == "arrow_function":
-                return self._extract_function(expr, source_bytes, file_path, is_arrow=True)
-            return None
+            fn = self._extract_function(node, source_bytes, file_path, override_name=fn_name)
+            if fn:
+                functions.append(fn)
 
-        if t in ("function_declaration", "function", "method_definition"):
-            return self._extract_function(node, source_bytes, file_path)
-
-        return None
+        return functions
 
     # ── Function extraction ────────────────────────────────────────────────
 
-    def _extract_function(self, node, source_bytes, file_path, is_arrow=False) -> Optional[IRFunction]:
-        name = "<anonymous>"
+    def _extract_function(self, node, source_bytes, file_path, is_arrow=False, override_name="") -> Optional[IRFunction]:
+        name = override_name or "<anonymous>"
         params = []
         body_node = None
 
         if node.type == "function_declaration":
             name_node = node.child_by_field_name("name")
-            if name_node:
+            if name_node and not override_name:
                 name = self._node_text(name_node, source_bytes)
             params = self._extract_params(
                 node.child_by_field_name("parameters") or node.child_by_field_name("formal_parameters"),
@@ -149,7 +171,7 @@ class JsTsExtractor:
             body_node = node.child_by_field_name("body")
         elif node.type == "method_definition":
             name_node = node.child_by_field_name("name")
-            if name_node:
+            if name_node and not override_name:
                 name = self._node_text(name_node, source_bytes)
             params = self._extract_params(
                 node.child_by_field_name("parameters") or node.child_by_field_name("formal_parameters"),
@@ -162,9 +184,8 @@ class JsTsExtractor:
                 source_bytes,
             )
             body_node = node.child_by_field_name("body")
-            # For arrow functions without block body, wrap in return
             if body_node and body_node.type != "statement_block":
-                pass  # handled below
+                pass
 
         if not body_node:
             return None
@@ -391,6 +412,14 @@ class JsTsExtractor:
             return arg
 
         elif t == "template_string":
+            sub_exprs = []
+            for child in node.children:
+                if child.type == "template_substitution" and child.named_children:
+                    sub = self._extract_expr(child.named_children[0], source_bytes, file_path)
+                    if sub:
+                        sub_exprs.append(sub)
+            if sub_exprs:
+                return IRCallExpr(target="template_concat", args=sub_exprs)
             return IRLiteral(self._node_text(node, source_bytes)[:80], "string")
 
         elif t == "assignment_expression":
@@ -506,16 +535,13 @@ class JsTsExtractor:
 
     def _build_stmt_provenance(self, stmt, mod: IRModule, conditions: list[int]):
         if isinstance(stmt, IRAssign):
-            if stmt.value:
-                # Edges from all expression nodes (including IRAccess) to the assignment
-                all_expr_ids = self._collect_all_expr_ids(stmt.value)
-                for eid in all_expr_ids:
-                    mod.add_edge(
-                        source_id=eid,
-                        target_id=stmt.id,
-                        transform="assign",
-                        conditions=conditions or None,
-                    )
+            if stmt.value and hasattr(stmt.value, "id") and stmt.value.id:
+                mod.add_edge(
+                    source_id=stmt.value.id,
+                    target_id=stmt.id,
+                    transform="assign",
+                    conditions=conditions or None,
+                )
                 # Edge from assignment statement to the target variable(s) or property access
                 destructured_vars = self._parse_destructured_vars(stmt.target)
                 if destructured_vars:
@@ -560,7 +586,7 @@ class JsTsExtractor:
         elif isinstance(stmt, IRCall):
             # Edge from each arg to the call (for sink detection)
             for arg in stmt.args:
-                src_ids = self._collect_var_ids(arg)
+                src_ids = self._get_expr_id(arg)
                 for sid in src_ids:
                     mod.add_edge(
                         source_id=sid,
@@ -568,6 +594,17 @@ class JsTsExtractor:
                         transform=stmt.target,
                         conditions=conditions or None,
                     )
+                self._build_expr_provenance(arg, mod, conditions)
+            if stmt.receiver:
+                src_ids = self._get_expr_id(stmt.receiver)
+                for sid in src_ids:
+                    mod.add_edge(
+                        source_id=sid,
+                        target_id=stmt.id,
+                        transform=stmt.target,
+                        conditions=conditions or None,
+                    )
+                self._build_expr_provenance(stmt.receiver, mod, conditions)
             # If call has a result_var, edge from call to result
             if stmt.result_var:
                 assign_id = f"assign_{stmt.result_var}"  # synthetic ID for the assignment
@@ -587,7 +624,7 @@ class JsTsExtractor:
 
         elif isinstance(stmt, IRReturn):
             if stmt.value:
-                src_ids = self._collect_var_ids(stmt.value)
+                src_ids = self._get_expr_id(stmt.value)
                 for sid in src_ids:
                     mod.add_edge(
                         source_id=sid,
@@ -595,9 +632,15 @@ class JsTsExtractor:
                         transform="return",
                         conditions=conditions or None,
                     )
+                self._build_expr_provenance(stmt.value, mod, conditions)
+
+    def _get_expr_id(self, expr) -> list[str]:
+        if hasattr(expr, "id") and expr.id:
+            return [expr.id]
+        return []
 
     def _build_expr_provenance(self, expr, mod: IRModule, conditions: list[int]):
-        """Recurse into expressions to find nested calls with result vars."""
+        """Recurse into expressions to find nested calls and build data-flow provenance edges."""
         if isinstance(expr, IRCallExpr):
             assign_id = f"assign_expr_{expr.id}"
             mod.add_edge(
@@ -607,7 +650,35 @@ class JsTsExtractor:
                 conditions=conditions or None,
             )
             for arg in expr.args:
+                src_ids = self._get_expr_id(arg)
+                for sid in src_ids:
+                    mod.add_edge(
+                        source_id=sid,
+                        target_id=expr.id,
+                        transform=expr.target,
+                        conditions=conditions or None,
+                    )
                 self._build_expr_provenance(arg, mod, conditions)
+            if expr.receiver:
+                src_ids = self._get_expr_id(expr.receiver)
+                for sid in src_ids:
+                    mod.add_edge(
+                        source_id=sid,
+                        target_id=expr.id,
+                        transform=expr.target,
+                        conditions=conditions or None,
+                    )
+                self._build_expr_provenance(expr.receiver, mod, conditions)
+        elif isinstance(expr, IRAccess):
+            src_ids = self._get_expr_id(expr.root)
+            for sid in src_ids:
+                mod.add_edge(
+                    source_id=sid,
+                    target_id=expr.id,
+                    transform="access",
+                    conditions=conditions or None,
+                )
+            self._build_expr_provenance(expr.root, mod, conditions)
 
     def _collect_var_ids(self, expr) -> list[str]:
         """Collect all IRVar IDs referenced in an expression."""
@@ -705,12 +776,20 @@ class JsTsExtractor:
             self._tag_expr(mod, stmt.value)
         elif isinstance(stmt, IRCall):
             self._tag_call(mod, stmt)
+            for arg in stmt.args:
+                self._tag_expr(mod, arg)
+            if stmt.receiver:
+                self._tag_expr(mod, stmt.receiver)
         elif isinstance(stmt, IRBranch):
-            self._tag_stmt(mod, stmt.condition)
+            if stmt.condition:
+                self._tag_expr(mod, stmt.condition)
             for s in stmt.true_body:
                 self._tag_stmt(mod, s)
             for s in stmt.false_body:
                 self._tag_stmt(mod, s)
+        elif isinstance(stmt, IRReturn):
+            if stmt.value:
+                self._tag_expr(mod, stmt.value)
 
     def _tag_call(self, mod: IRModule, call: IRCall):
         target = call.target.lower()
@@ -739,23 +818,30 @@ class JsTsExtractor:
                             mod.add_tag(tag, call.id)
 
     def _source_tag_for_access(self, root_name: str, path: list) -> str | None:
-        """Determine source tag based on full access chain."""
-        if root_name in SOURCE_ROOTS:
+        """Determine source tag based on full access chain across web frameworks."""
+        rn = root_name.lower()
+        if rn in SOURCE_ROOTS:
             if path and isinstance(path[0], str):
                 first = path[0].lower()
-                if first in ("body",):
+                if first in ("body", "json", "payload", "data"):
                     return "SOURCE_HTTP_BODY"
-                elif first in ("params",):
+                elif first in ("params", "param"):
                     return "SOURCE_URL_PARAM"
-                elif first in ("query",):
+                elif first in ("query", "searchparams", "url"):
                     return "SOURCE_URL_QUERY"
-                elif first in ("json",):
-                    return "SOURCE_HTTP_BODY"
+                elif first in ("cookies", "cookie"):
+                    return "COOKIE"
+                elif first in ("headers", "header"):
+                    return "AUTH_HEADER"
             return "SOURCE_HTTP_BODY"
-        if root_name == "session":
+        if rn in ("session", "auth"):
             return "SOURCE_SESSION"
-        if root_name == "process" and path and path[0] == "env":
+        if rn == "process" and path and isinstance(path[0], str) and path[0].lower() == "env":
             return "SOURCE_ENV"
+        if rn == "msg" and path and isinstance(path[0], str):
+            first = path[0].lower()
+            if first in ("payload", "req"):
+                return "SOURCE_HTTP_BODY"
         return None
 
     def _tag_operations(self, mod: IRModule, expr: IRCallExpr):

@@ -7,6 +7,7 @@ data-flow paths from sources to sinks, with inter-procedural propagation
 and sanitizer (VALIDATION_GATE) awareness.
 """
 
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 import fnmatch
@@ -19,11 +20,11 @@ from extractors.call_graph import CallGraph
 
 SINK_DB_PATTERNS = {
     "*db.*", "*query*", "*prisma*", "*knex*", "*mongoose*", "*sequelize*",
-    "*repository*", "*model*", "*orm*", "*$transaction*", "*$execute*",
+    "*repository*", "*model*", "*orm*", "*$transaction*", "*$execute*", "*$queryrawunsafe*", "*sql.raw*",
     "*.findunique*", "*.findmany*", "*.findfirst*", "*.findone*",
     "*.create*", "*.createmany*", "*.update*", "*.updatemany*",
     "*.delete*", "*.deletemany*", "*.upsert*", "*.raw*", "*.executesql*",
-    "*.insert*", "*.save*", "*.select*",
+    "*.insert*", "*.save*", "*.select*", "*$where*", "*mapreduce*",
 }
 
 JS_STD_EXCLUSIONS = {
@@ -33,15 +34,21 @@ JS_STD_EXCLUSIONS = {
 }
 
 SINK_SHELL_PATTERNS = {
-    "*exec*", "*spawn*", "*child_process*", "*shell*", "*system*", "*popen*", "*execsync*"
+    "*exec*", "*spawn*", "*child_process*", "*shell*", "*system*", "*popen*", "*execsync*", "*eval*"
 }
 
 SINK_FILE_PATTERNS = {
-    "*readfile*", "*writefile*", "*openfile*", "*unlink*", "*readdir*", "*fs.*", "*file.*", "*stream*"
+    "*readfile*", "*writefile*", "*openfile*", "*unlink*", "*readdir*", "*fs.*", "*file.*", "*stream*",
+    "*sendfile*", "*download*", "*createreadstream*"
 }
 
 SINK_NETWORK_PATTERNS = {
-    "*fetch*", "*axios*", "*request*", "*ajax*", "*http.*", "*https.*", "*got*", "*superagent*"
+    "*fetch*", "*axios*", "*request*", "*ajax*", "*http.*", "*https.*", "*got*", "*superagent*",
+    "*undici*", "*redirect*", "*permanentredirect*"
+}
+
+SINK_XSS_PATTERNS = {
+    "*dangerouslysetinnerhtml*", "*innerhtml*", "*outerhtml*", "*document.write*", "*res.send*", "*res.write*", "*res.render*"
 }
 
 SOURCE_TAG_KINDS = {
@@ -54,7 +61,7 @@ OP_TAG_KINDS = {
 }
 
 SINK_TAG_KINDS = {
-    "SQL_QUERY", "SHELL_EXEC", "FILE_ACCESS", "NETWORK_CALL",
+    "SQL_QUERY", "SHELL_EXEC", "FILE_ACCESS", "NETWORK_CALL", "XSS_OUTPUT"
 }
 
 
@@ -81,6 +88,8 @@ def detect_sink_type(call_target: str) -> Optional[tuple[str, float]]:
         return ("SINK_DATABASE", 0.85)
     if matches_any_glob(call_target, SINK_FILE_PATTERNS):
         return ("SINK_FILE", 0.85)
+    if matches_any_glob(call_target, SINK_XSS_PATTERNS):
+        return ("SINK_XSS", 0.85)
     if matches_any_glob(call_target, SINK_NETWORK_PATTERNS):
         return ("SINK_NETWORK", 0.85)
     return None
@@ -121,6 +130,11 @@ class TaintEngine:
         self._op_tag_nodes: dict[str, list[str]] = {}       # node_id → [OP_COERCION, ...]
         self._all_edges: list[Edge] = []
         self._edges_by_file: dict[str, list[Edge]] = {}     # file_path → edges
+        self._incoming_by_file: dict[str, dict[str, list[Edge]]] = {} # file_path → {target_id → [Edge]}
+        self._outgoing_by_file: dict[str, dict[str, list[Edge]]] = {} # file_path → {source_id → [Edge]}
+        self._param_node_ids: set[str] = set()
+        self._node_to_fn_cache: dict[str, str] = {}
+        self._memo: dict[tuple[str, str], list] = {}
         self._sibling_explored_parents: set[str] = set()    # parent IDs whose siblings have been fully explored
 
         self._build_indexes()
@@ -130,8 +144,16 @@ class TaintEngine:
         self._callee_to_calls: dict[str, list[tuple[str, IRModule]]] = {}
 
         for mod in self.modules:
+            fp = mod.file_path
             self._all_edges.extend(mod.provenance_edges)
-            self._edges_by_file[mod.file_path] = mod.provenance_edges
+            self._edges_by_file[fp] = mod.provenance_edges
+
+            inc_map = self._incoming_by_file.setdefault(fp, {})
+            out_map = self._outgoing_by_file.setdefault(fp, {})
+            for e in mod.provenance_edges:
+                inc_map.setdefault(e.target_id, []).append(e)
+                out_map.setdefault(e.source_id, []).append(e)
+
             for tag in mod.semantic_tags:
                 if tag.kind in SOURCE_TAG_KINDS:
                     self._source_nodes[tag.node_id] = tag
@@ -139,9 +161,16 @@ class TaintEngine:
                     self._sanitizer_nodes[tag.node_id] = tag
                 if tag.kind in OP_TAG_KINDS:
                     self._op_tag_nodes.setdefault(tag.node_id, []).append(tag.kind)
+
             for fn in mod.functions:
                 self._node_id_to_fn[fn.id] = fn
                 self._fn_id_to_module[fn.id] = mod
+                self._index_fn_nodes(fn, mod)
+                for p in fn.params:
+                    from ir import IRVar
+                    p_var_id = IRVar(p).id
+                    self._param_node_ids.add(p_var_id)
+
             for res in mod.call_resolutions:
                 if res.resolved_fn_id:
                     self._call_id_to_resolved_fn[res.call_id] = res.resolved_fn_id
@@ -151,8 +180,7 @@ class TaintEngine:
         """Main entry point. Returns all detected taint paths."""
         paths: list[TaintPath] = []
         sinks = self._collect_sinks()
-
-        for sink_node_id, sink_target, sink_type, file_path in sinks:
+        for idx, (sink_node_id, sink_target, sink_type, file_path) in enumerate(sinks, 1):
             self._sibling_explored_parents.clear()
             result = self._backward_propagate(sink_node_id, file_path)
             if result:
@@ -208,11 +236,18 @@ class TaintEngine:
                 result = detect_sink_type(stmt.target)
                 if result:
                     acc.append((stmt.id, stmt.target, result[0], file_path))
+                for arg in stmt.args:
+                    self._collect_expr_sinks(arg, acc, file_path)
+                if stmt.receiver:
+                    self._collect_expr_sinks(stmt.receiver, acc, file_path)
             elif isinstance(stmt, IRAssign):
                 self._collect_expr_sinks(stmt.value, acc, file_path)
             elif isinstance(stmt, IRBranch):
                 self._collect_stmt_sinks(stmt.true_body, file_path, acc)
                 self._collect_stmt_sinks(stmt.false_body, file_path, acc)
+            elif isinstance(stmt, IRReturn):
+                if stmt.value:
+                    self._collect_expr_sinks(stmt.value, acc, file_path)
 
     def _collect_expr_sinks(self, expr, acc: list, file_path: str):
         if isinstance(expr, IRCallExpr):
@@ -221,6 +256,8 @@ class TaintEngine:
                 acc.append((expr.id, expr.target, result[0], file_path))
             for arg in expr.args:
                 self._collect_expr_sinks(arg, acc, file_path)
+            if expr.receiver:
+                self._collect_expr_sinks(expr.receiver, acc, file_path)
         elif isinstance(expr, IRAccess):
             self._collect_expr_sinks(expr.root, acc, file_path)
 
@@ -238,8 +275,14 @@ class TaintEngine:
 
         Returns list of (source_node_id, path_node_ids, sanitized, sanitizer_ids, operation_tags).
         """
+        memo_key = (start_node_id, file_path)
         if visited is None:
             visited = set()
+            if memo_key in self._memo:
+                return self._memo[memo_key]
+        elif memo_key in self._memo and start_node_id not in visited:
+            return self._memo[memo_key]
+
         if path is None:
             path = [start_node_id]
 
@@ -264,10 +307,9 @@ class TaintEngine:
         is_sanitized = sanitizer_tag is not None
         sanitizer_ids = [start_node_id] if sanitizer_tag else []
 
-        # Use file-scoped edges to avoid cross-module contamination from ID collisions
-        file_edges = self._edges_by_file.get(file_path, self._all_edges)
-        incoming = [e for e in file_edges if e.target_id == start_node_id]
-        outgoing = [e for e in file_edges if e.source_id == start_node_id]
+        # Fast O(1) edge lookup
+        inc_map = self._incoming_by_file.get(file_path, {})
+        incoming = inc_map.get(start_node_id, [])
 
         if incoming:
             for edge in incoming:
@@ -285,30 +327,6 @@ class TaintEngine:
                         all_sanitizers,
                         all_op_tags,
                     ))
-        elif outgoing:
-            parent_ids = {e.target_id for e in outgoing}
-            for parent_id in parent_ids:
-                if parent_id in self._sibling_explored_parents:
-                    continue
-                self._sibling_explored_parents.add(parent_id)
-                siblings = [e2.source_id for e2 in file_edges
-                            if e2.target_id == parent_id and e2.source_id != start_node_id]
-                for sib_id in siblings:
-                    if sib_id in visited:
-                        continue
-                    new_path = path + [sib_id]
-                    for sub_result in self._backward_propagate(
-                        sib_id, file_path, depth + 1, visited, new_path
-                    ):
-                        src_id2, p, sanitized_flag, sanitizers, op_tags = sub_result
-                        all_sanitizers = sanitizer_ids + sanitizers
-                        all_op_tags = list(set(node_op_tags + op_tags))
-                        results.append((
-                            src_id2, p,
-                            is_sanitized or sanitized_flag,
-                            all_sanitizers,
-                            all_op_tags,
-                        ))
 
         # If edge-based propagation found nothing, try inter-procedural lookups
         if not results:
@@ -330,39 +348,41 @@ class TaintEngine:
                             all_op_tags,
                         ))
 
-            # 2. Check if this node (a parameter/var) belongs to a function that is called
-            #    → walk backward from the caller's call site
-            fn_id = self._node_id_to_function(start_node_id)
-            if fn_id:
-                caller_sites = self._callee_to_calls.get(fn_id, [])
-                for call_node_id, caller_mod in caller_sites:
-                    new_path = path + [call_node_id]
-                    for sub_result in self._backward_propagate(
-                        call_node_id, caller_mod.file_path, depth + 1, visited, new_path
-                    ):
-                        src_id, p, sanitized_flag, sanitizers, op_tags = sub_result
-                        all_sanitizers = sanitizer_ids + sanitizers
-                        all_op_tags = list(set(node_op_tags + op_tags))
-                        results.append((
-                            src_id, p,
-                            is_sanitized or sanitized_flag,
-                            all_sanitizers,
-                            all_op_tags,
-                        ))
+            # 2. Check if this node is a function parameter → walk backward from caller call sites
+            if start_node_id in self._param_node_ids:
+                fn_id = self._node_id_to_function(start_node_id)
+                if fn_id:
+                    caller_sites = self._callee_to_calls.get(fn_id, [])
+                    for call_node_id, caller_mod in caller_sites:
+                        new_path = path + [call_node_id]
+                        for sub_result in self._backward_propagate(
+                            call_node_id, caller_mod.file_path, depth + 1, visited, new_path
+                        ):
+                            src_id, p, sanitized_flag, sanitizers, op_tags = sub_result
+                            all_sanitizers = sanitizer_ids + sanitizers
+                            all_op_tags = list(set(node_op_tags + op_tags))
+                            results.append((
+                                src_id, p,
+                                is_sanitized or sanitized_flag,
+                                all_sanitizers,
+                                all_op_tags,
+                            ))
 
         visited.discard(start_node_id)
+        if results:
+            dedup_results = []
+            seen_res = set()
+            for r in results:
+                key = (r[0], r[2])
+                if key not in seen_res:
+                    seen_res.add(key)
+                    dedup_results.append(r)
+            results = dedup_results
+            self._memo[memo_key] = results
         return results
 
     def _node_id_to_function(self, node_id: str) -> Optional[str]:
-        """Find which function contains a given node ID.
-        Checks both statement IDs and expression IDs within each function.
-        """
-        # Build a cache on first call
-        if not hasattr(self, '_node_to_fn_cache'):
-            self._node_to_fn_cache: dict[str, str] = {}
-            for mod in self.modules:
-                for fn in mod.functions:
-                    self._index_fn_nodes(fn, mod)
+        """Find which function contains a given node ID."""
         return self._node_to_fn_cache.get(node_id)
 
     def _index_fn_nodes(self, fn: IRFunction, mod: IRModule):

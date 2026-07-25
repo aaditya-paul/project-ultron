@@ -7,7 +7,7 @@ with support for path finding, cycle detection, and serialization.
 """
 
 from typing import Optional
-from ir import IRModule, IRFunction, IRCall, IRBranch, IRAssign, IRCallExpr
+from ir import IRModule, IRFunction, IRCall, IRBranch, IRAssign, IRCallExpr, IRReturn
 
 
 def _find_stmt_container_id(stmts: list, target_id: str) -> Optional[str]:
@@ -71,14 +71,52 @@ class CallGraph:
             for fn in mod.functions:
                 self.fn_index.setdefault(fn.id, (mod.file_path, fn.name))
 
+        # Single-pass O(N) map from call_id -> caller_fn_id
+        call_parent_map: dict[str, str] = {}
+        for mod in modules:
+            for fn in mod.functions:
+                self._index_fn_body_calls(fn.body, fn.id, call_parent_map)
+
         for mod in modules:
             for res in mod.call_resolutions:
                 if not res.resolved_fn_id:
                     continue
                 self.call_map[res.call_id] = res.resolved_fn_id
-                caller_id = _find_fn_for_call(modules, res.call_id)
+                caller_id = call_parent_map.get(res.call_id)
                 if caller_id:
                     self._add_edge(caller_id, res.resolved_fn_id)
+
+    def _index_fn_body_calls(self, stmts: list, fn_id: str, call_parent_map: dict):
+        for stmt in stmts:
+            if hasattr(stmt, 'id'):
+                call_parent_map[stmt.id] = fn_id
+            if isinstance(stmt, IRCall):
+                if stmt.receiver:
+                    self._index_expr_calls(stmt.receiver, fn_id, call_parent_map)
+                for a in stmt.args:
+                    self._index_expr_calls(a, fn_id, call_parent_map)
+            elif isinstance(stmt, IRAssign):
+                if stmt.value:
+                    self._index_expr_calls(stmt.value, fn_id, call_parent_map)
+            elif isinstance(stmt, IRBranch):
+                if stmt.condition:
+                    self._index_expr_calls(stmt.condition, fn_id, call_parent_map)
+                self._index_fn_body_calls(stmt.true_body, fn_id, call_parent_map)
+                self._index_fn_body_calls(stmt.false_body, fn_id, call_parent_map)
+            elif isinstance(stmt, IRReturn):
+                if stmt.value:
+                    self._index_expr_calls(stmt.value, fn_id, call_parent_map)
+
+    def _index_expr_calls(self, expr, fn_id: str, call_parent_map: dict):
+        if not expr:
+            return
+        if hasattr(expr, 'id'):
+            call_parent_map[expr.id] = fn_id
+        if hasattr(expr, 'args'):
+            for a in expr.args:
+                self._index_expr_calls(a, fn_id, call_parent_map)
+        if hasattr(expr, 'receiver') and expr.receiver:
+            self._index_expr_calls(expr.receiver, fn_id, call_parent_map)
 
     def _add_edge(self, caller_fn_id: str, callee_fn_id: str):
         self.adjacency.setdefault(caller_fn_id, set()).add(callee_fn_id)

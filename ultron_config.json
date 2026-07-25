@@ -8,6 +8,7 @@
   "verbose": false,
   "visualise": true,
   "generate_pdf": true,
+  "llm_max_workers": 5,
   "version": "8.0.0",
   "model_overrides": {
     "classifier": "gemma4:e2b",
@@ -33,8 +34,8 @@
   "enable_cache": true,
   "cache_only": false,
   "rate_limits": {
-    "groq": { "requests_per_minute": 30, "max_concurrent": 2 },
-    "gemini": { "requests_per_minute": 60, "max_concurrent": 3 },
-    "nvidia": { "requests_per_minute": 50, "max_concurrent": 2 }
+    "groq": { "requests_per_minute": 60, "max_concurrent": 5 },
+    "gemini": { "requests_per_minute": 120, "max_concurrent": 8 },
+    "nvidia": { "requests_per_minute": 60, "max_concurrent": 5 }
   }
 }

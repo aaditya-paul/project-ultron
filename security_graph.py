@@ -79,6 +79,19 @@ def _index_expr(expr, index, file_path, line):
     elif isinstance(expr, IRVar) or isinstance(expr, IRLiteral):
         pass
 
+from functools import lru_cache
+import hashlib
+
+@lru_cache(maxsize=8192)
+def _var_id(name: str) -> str:
+    h = hashlib.md5(f"::::{name}".encode()).hexdigest()[:7]
+    return f"VAR_{h}"
+
+@lru_cache(maxsize=8192)
+def _access_id(root_name: str, path_str: str) -> str:
+    h = hashlib.md5(f"::::{root_name}.{path_str}".encode()).hexdigest()[:7]
+    return f"ACCESS_{h}"
+
 def _index_stmt(stmt, index, file_path, line):
     if stmt.id and stmt.id not in index:
         index[stmt.id] = {"label": _stmt_label(stmt), "file_path": file_path, "line": line}
@@ -88,7 +101,7 @@ def _index_stmt(stmt, index, file_path, line):
         for a in stmt.args:
             _index_expr(a, index, file_path, line)
         if stmt.result_var:
-            rv_id = IRVar(stmt.result_var).id
+            rv_id = _var_id(stmt.result_var)
             if rv_id not in index:
                 index[rv_id] = {"label": stmt.result_var, "file_path": file_path, "line": line}
     elif isinstance(stmt, IRAssign):
@@ -99,14 +112,15 @@ def _index_stmt(stmt, index, file_path, line):
             parts = target_str.split(".")
             root_var = parts[0]
             prop_path = parts[1:]
-            acc_id = IRAccess(root=IRVar(root_var), path=prop_path).id
-            root_id = IRVar(root_var).id
+            path_str = ".".join(prop_path)
+            acc_id = _access_id(root_var, path_str)
+            root_id = _var_id(root_var)
             if acc_id not in index:
                 index[acc_id] = {"label": target_str, "file_path": file_path, "line": line}
             if root_id not in index:
                 index[root_id] = {"label": root_var, "file_path": file_path, "line": line}
         else:
-            var_id = IRVar(target_str).id
+            var_id = _var_id(target_str)
             if var_id not in index:
                 index[var_id] = {"label": target_str, "file_path": file_path, "line": line}
     elif isinstance(stmt, IRBranch):
@@ -128,19 +142,26 @@ def build_node_index(ir_modules):
             if fn.id not in index:
                 index[fn.id] = {"label": fn_label, "file_path": fp, "line": fn.line}
             for p in fn.params:
-                p_var_id = IRVar(p).id
+                p_var_id = _var_id(p)
                 if p_var_id not in index:
                     index[p_var_id] = {"label": p, "file_path": fp, "line": fn.line}
             for stmt in fn.body:
                 _index_stmt(stmt, index, fp, getattr(stmt, 'line', 0))
     return index
 
+from ir import IRVar, IRAccess, IRCallExpr, IRLiteral, IRCall, IRAssign, IRBranch, IRReturn, IRFunction, IRExpr, NODE_REGISTRY
+
 def get_node_human_label(nid: str, node_index: dict) -> tuple[str, str, int]:
     """Resolve any node ID to (label, file_path, line). Never returns raw hash ID."""
     if nid in node_index:
         info = node_index[nid]
         return info.get("label", nid), info.get("file_path", ""), info.get("line", 0)
-    
+
+    # Check global NODE_REGISTRY populated during IR object creation
+    if nid in NODE_REGISTRY:
+        _, label = NODE_REGISTRY[nid]
+        return label, "", 0
+
     # Fallback for synthetic / un-indexed nodes based on prefix
     prefix = nid.split("_")[0] if "_" in nid else ""
     fallback_map = {

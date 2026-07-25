@@ -21,7 +21,7 @@ from extractors.call_graph import CallGraph
 from extractors.taint_engine import TaintEngine
 
 
-def run_ir_pipeline(target: str, ast_data: dict):
+def run_ir_pipeline(target: str, ast_data: dict, verbose: bool = False):
     """Extract IR from JS/TS files, resolve symbols, build call graph, run taint engine.
     Returns (ir_modules, call_graph, taint_paths).
     """
@@ -29,10 +29,14 @@ def run_ir_pipeline(target: str, ast_data: dict):
     ir_modules = []
     total_ir_funcs = 0
 
-    for fpath, info in ast_data.get("files", {}).items():
+    candidate_files = [
+        (fp, info) for fp, info in ast_data.get("files", {}).items()
+        if info.get("language") in ("TypeScript", "JavaScript", "TSX")
+    ]
+    total_files = len(candidate_files)
+
+    for idx, (fpath, info) in enumerate(candidate_files, 1):
         lang = info.get("language", "")
-        if lang not in ("TypeScript", "JavaScript", "TSX"):
-            continue
         full_path = os.path.join(target, fpath)
         if not os.path.isfile(full_path):
             continue
@@ -45,16 +49,25 @@ def run_ir_pipeline(target: str, ast_data: dict):
         if mod:
             ir_modules.append(mod)
             total_ir_funcs += len(mod.functions)
+            if verbose:
+                print(f"    {DIM}[IR {idx}/{total_files}]{RST} {WHT}{fpath}{RST} ({len(mod.functions)} function(s) extracted)")
 
     if not ir_modules:
         print(f"  {DIM}[*]{RST} IR pipeline: no JS/TS files to process")
         return ir_modules, CallGraph(), []
 
+    if verbose:
+        print(f"    {CYAN}[*]{RST} resolving IR symbols and module imports across {len(ir_modules)} modules...")
     resolver = SymbolResolver(ir_modules)
     resolver.resolve_all()
     total_resolved = sum(len(mod.call_resolutions) for mod in ir_modules)
 
+    if verbose:
+        print(f"    {CYAN}[*]{RST} constructing inter-procedural call graph...")
     cg = CallGraph(ir_modules)
+
+    if verbose:
+        print(f"    {CYAN}[*]{RST} running inter-procedural taint propagation engine...")
     te = TaintEngine(ir_modules, cg)
     taint_paths = te.run()
 
@@ -139,7 +152,7 @@ def run_ir_analysis(repo_name, target, ir_modules, call_graph, taint_paths):
             else:
                 print(f"  {YLW}[!]{RST} no LLM available — running deterministic rules only")
 
-    # When LLM is active, skip flow-based rule findings (LLM will analyze the same flows)
+    # When LLM is active, run LLM flow detection first to replace raw flow rules with confirmed LLM findings
     if detector_client and detector_client.is_available():
         flow_rules = {"unvalidated-source-to-sink", "sql-injection-via-concat",
                        "path-traversal", "ssrf-dynamic-url", "database-write-without-validation"}
@@ -147,8 +160,10 @@ def run_ir_analysis(repo_name, target, ir_modules, call_graph, taint_paths):
         auth_validated = run_llm_auth_validation(security_graph, detector_client)
         findings = [f for f in findings if (
             f.get("rule") != "missing-authentication" or
-            f.get("route", "") in auth_validated
+            f.get("route", "") in (auth_validated or {})
         )]
+        llm_findings = run_llm_detection(repo_name, security_graph, detector_client, ir_modules=ir_modules, verbose=False)
+        findings.extend(llm_findings)
     else:
         print(f"  {DIM}[*]{RST} LLM detection disabled (use_llm=false or --no-llm)")
 
@@ -172,10 +187,6 @@ def run_ir_analysis(repo_name, target, ir_modules, call_graph, taint_paths):
         taint_vis = render_taint_graph(taint_paths, taint_out)
         if taint_vis:
             print(f"  {GRN}[+]{RST} taint propagation visualisation saved -> {WHT}{taint_vis}{RST}")
-
-    if detector_client and detector_client.is_available():
-        llm_findings = run_llm_detection(repo_name, security_graph, detector_client, ir_modules=ir_modules, verbose=False)
-        findings.extend(llm_findings)
 
     node_index = build_node_index(ir_modules)
     show_findings_summary(findings, security_graph, node_index, auth_validated)
@@ -202,14 +213,14 @@ def run_ir_analysis(repo_name, target, ir_modules, call_graph, taint_paths):
         if pdf_path:
             print(f"  {GRN}[+]{RST} PDF security report saved -> {WHT}{pdf_path}{RST}")
 
-    # If visualise flag is on, open SVGs in browser
+    # If visualise flag is on, open SVGs and PDF report in browser/viewer
     if config.get("visualise", False) or os.environ.get("ULTRON_VISUALISE") == "1":
         import webbrowser
-        for svg_name in ["dependency_graph.svg", "taint_graph.svg", "security_graph.svg"]:
-            svg_path = os.path.join(out_dir, svg_name)
-            if os.path.isfile(svg_path):
+        for item_name in ["dependency_graph.svg", "taint_graph.svg", "security_graph.svg", "security_report.pdf"]:
+            item_path = os.path.join(out_dir, item_name)
+            if os.path.isfile(item_path):
                 try:
-                    webbrowser.open(f"file://{os.path.abspath(svg_path)}")
+                    webbrowser.open(f"file://{os.path.abspath(item_path)}")
                 except Exception:
                     pass
 
@@ -235,8 +246,10 @@ def analyze_and_save(repo_url, repo_name):
     print(f"  {CYAN}[*]{RST} parsing AST...")
     ast_data = parse_repo(target)
 
+    config = load_config()
+    is_verbose = config.get("verbose", False) or "--verbose" in sys.argv or "-v" in sys.argv
     print(f"  {CYAN}[*]{RST} running IR pipeline...")
-    ir_modules, cg, taint_paths = run_ir_pipeline(target, ast_data)
+    ir_modules, cg, taint_paths = run_ir_pipeline(target, ast_data, verbose=is_verbose)
 
     save_and_report(repo_name, target, ast_data, ir_modules, cg, taint_paths)
 
@@ -265,8 +278,10 @@ def cmd_scan(name):
     print(f"  {CYAN}[*]{RST} parsing AST...")
     ast_data = parse_repo(target)
 
+    config = load_config()
+    is_verbose = config.get("verbose", False) or "--verbose" in sys.argv or "-v" in sys.argv
     print(f"  {CYAN}[*]{RST} running IR pipeline...")
-    ir_modules, cg, taint_paths = run_ir_pipeline(target, ast_data)
+    ir_modules, cg, taint_paths = run_ir_pipeline(target, ast_data, verbose=is_verbose)
 
     save_and_report(name, target, ast_data, ir_modules, cg, taint_paths)
 

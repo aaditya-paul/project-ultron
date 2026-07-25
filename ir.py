@@ -24,6 +24,9 @@ _ID_PREFIX = {
 }
 
 
+NODE_REGISTRY: dict[str, tuple[str, str]] = {}
+
+
 # ── Expressions (value-producing nodes) ────────────────────────────────────
 
 @dataclass
@@ -55,6 +58,7 @@ class IRVar(IRExpr):
     def __post_init__(self):
         if not self.id:
             self.id = _node_id("", "", _ID_PREFIX["IRVar"], self.name)
+        NODE_REGISTRY[self.id] = ("IRVar", self.name)
 
     def to_dict(self) -> dict:
         return {"type": self.type, "id": self.id, "name": self.name}
@@ -74,6 +78,7 @@ class IRLiteral(IRExpr):
     def __post_init__(self):
         if not self.id:
             self.id = _node_id("", "", _ID_PREFIX["IRLiteral"], str(self.value))
+        NODE_REGISTRY[self.id] = ("IRLiteral", str(self.value))
 
     def to_dict(self) -> dict:
         return {"type": self.type, "id": self.id, "value": self.value, "value_type": self.value_type}
@@ -91,12 +96,14 @@ class IRAccess(IRExpr):
     type: str = "IRAccess"
 
     def __post_init__(self):
+        path_str = ".".join(
+            p if isinstance(p, str) else f"[{p.name if isinstance(p, IRVar) else str(p)}]"
+            for p in self.path
+        )
         if not self.id:
-            path_str = ".".join(
-                p if isinstance(p, str) else f"[{p.name if isinstance(p, IRVar) else str(p)}]"
-                for p in self.path
-            )
             self.id = _node_id("", "", _ID_PREFIX["IRAccess"], path_str)
+        root_name = self.root.name if isinstance(self.root, IRVar) else str(self.root)
+        NODE_REGISTRY[self.id] = ("IRAccess", f"{root_name}.{path_str}")
 
     def to_dict(self) -> dict:
         return {
@@ -127,6 +134,7 @@ class IRCallExpr(IRExpr):
     def __post_init__(self):
         if not self.id:
             self.id = _node_id("", "", _ID_PREFIX["IRCallExpr"], self.target)
+        NODE_REGISTRY[self.id] = ("IRCallExpr", f"{self.target}()")
 
     def to_dict(self) -> dict:
         d = {"type": self.type, "id": self.id, "target": self.target, "args": [a.to_dict() for a in self.args]}
@@ -176,6 +184,7 @@ class IRCall(IRStmt):
     def __post_init__(self):
         if not self.id:
             self.id = _node_id("", "", _ID_PREFIX["IRCall"], self.target)
+        NODE_REGISTRY[self.id] = ("IRCall", f"{self.target}()")
 
     def to_dict(self) -> dict:
         d = {
@@ -216,6 +225,7 @@ class IRAssign(IRStmt):
     def __post_init__(self):
         if not self.id:
             self.id = _node_id("", "", _ID_PREFIX["IRAssign"], f"{self.target}=")
+        NODE_REGISTRY[self.id] = ("IRAssign", f"{self.target} = ...")
 
     def to_dict(self) -> dict:
         return {
