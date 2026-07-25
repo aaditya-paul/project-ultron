@@ -165,14 +165,14 @@ def run_rules(security_graph):
 
 def show_findings(findings):
     if not findings:
-        print(f"  {GRN}[+]{RST} no security findings from deterministic rules")
+        print(f"  {GRN}[+]{RST} no security findings")
         return
 
     by_severity = {"high": [], "medium": [], "low": []}
     for f in findings:
         by_severity.setdefault(f.get("severity", "low"), []).append(f)
 
-    print(f"  {YLW}[!]{RST} {len(findings)} deterministic finding(s):")
+    print(f"  {YLW}[!]{RST} {len(findings)} security finding(s):")
     for severity in ("high", "medium", "low"):
         for f in by_severity.get(severity, []):
             icon = {"high": RED, "medium": YLW, "low": DIM}.get(severity, DIM)

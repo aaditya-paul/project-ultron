@@ -21,24 +21,25 @@ A multi-agent system that finds security flaws in source code repositories by co
 # Run interactively
 python ultron.py
 
-# Pass URL directly (supports verbose tracing)
-python ultron.py https://github.com/user/repo [--verbose | -v]
+# Pass URL directly (supports verbose tracing and mode flag)
+python ultron.py https://github.com/user/repo [--verbose | -v] [--mode local|cloud]
 
 # List cloned repositories
 python ultron.py list
 
-# Scan an already-cloned repository (supports verbose tracing)
-python ultron.py scan <repo-name> [--verbose | -v]
+# Scan an already-cloned repository
+python ultron.py scan <repo-name> [--verbose | -v] [--mode local|cloud]
 
-# Build and export dependency/taint graph visualizations (supports verbose tracing)
-python ultron.py visualise <repo-name> [--verbose | -v]
-python ultron.py visualize <repo-name> [--verbose | -v]
+# Build and export dependency/taint graph visualizations
+python ultron.py visualise <repo-name> [--verbose | -v] [--mode local|cloud]
+python ultron.py visualize <repo-name> [--verbose | -v] [--mode local|cloud]
 
 # View/update configuration settings & model overrides
 python ultron.py config
 python ultron.py config <part/setting> <value>
 # e.g., python ultron.py config classifier llama3.1:8b
 # e.g., python ultron.py config visualise true
+# e.g., python ultron.py config llm_mode cloud
 
 # Reset configuration to defaults
 python ultron.py config reset
@@ -54,12 +55,12 @@ python ultron.py --help
 **Interactive commands:**
 | Input | Action |
 |---|---|
-| `<repository-url> [--verbose]` | clone the target |
+| `<repository-url> [--verbose] [--mode ...]` | clone the target |
 | `list` | list cloned repositories |
-| `scan <repo-name> [--verbose]` | scan an already-cloned repository |
+| `scan <repo-name> [--verbose] [--mode ...]` | scan an already-cloned repository |
 | `delete <repo-name>` | delete a cloned repository |
 | `delete --all` | delete all cloned repositories |
-| `visualise <name> [--verbose]` / `visualize <name> [--verbose]` | build/export dependency and taint graphs (DOT/SVG) and print text-based terminal graphs |
+| `visualise <name> [--verbose] [--mode ...]` / `visualize <name> [--verbose] [--mode ...]` | build/export dependency and taint graphs (DOT/SVG) and print text-based terminal graphs |
 | `config` | show current configuration |
 | `config <part/setting> <value>` | change a model override or setting (e.g. `config visualise true`) |
 | `config reset` | reset configuration to default settings |
@@ -82,15 +83,25 @@ Ultron maintains configuration settings in `ultron_config.json`. You can manage 
   - `timeout` (LLM API request timeout in seconds)
   - `num_workers` (number of parallel worker threads for batch LLM analysis)
   - `llm_url` (local LLM base URL, e.g. `http://localhost:11434`)
+- **LLM Mode**:
+  - `llm_mode` — set to `"local"` (default, uses Ollama/llama.cpp) or `"cloud"` (uses remote providers via API)
+  - You can also override mode per-command with `--mode local` or `--mode cloud` (no config change needed)
+- **Cloud Settings** (only used when `llm_mode` is `"cloud"`):
+  - `api_keys` — object with provider keys: `{"groq": "...", "gemini": "...", "nvidia": "..."}`
+  - `cloud_chain` — fallback order per agent part: `{"default": ["groq", "gemini", "nvidia"]}`
+  - `cloud_models` — model name per provider: `{"groq": "llama-3.3-70b-versatile", "gemini": "gemini-2.0-flash", "nvidia": "meta/llama-3.1-8b-instruct"}`
 - **Resetting defaults**: Run `config reset` to restore all options to original system defaults.
 
-### Verbose Tracing
-Append `--verbose`, `--debug`, `-v`, or `-d` to commands to see:
+### Flags
+
+**Verbose/Debug**: Append `--verbose`, `--debug`, `-v`, or `-d` to commands to see:
 - Manual glob/regex pattern-matching findings (reasons for pattern classification).
 - Local LLM input prompts and raw completion outputs.
 - Raw LLM parser outputs and confidence scores.
 - LLM endpoint connection timeouts or errors.
 - Detailed variable taint propagation stages (assignments, argument passing, return values, sanitizer logs).
+
+**LLM Mode**: Append `--mode local` or `--mode cloud` to any command to switch between local and cloud LLM providers for that single invocation, overriding the `llm_mode` config setting.
 
 If a repository already exists locally, you'll be prompted to pull latest changes instead of re-cloning.
 
@@ -133,12 +144,10 @@ The program **never exits on errors** — clone failures, invalid commands, miss
 [4. Taint Propagation]  ── Language-agnostic data flow taint      ✅ MVP done
      │                      Source → variable assignments → sinks
      ▼
-[5. Rule Engine]  ── Deterministic checks on flows                ✅ MVP done
-     │                 missing auth, concat SQLi, path traversal
+[5. LLM Detector]       ── Taint-guided LLM verification          ✅ MVP done
+     │                      Feeds relevant flow files to a good LLM
      ▼
-[6. LLM Investigation]  ── Multi-agent reasoning on paths         🔲 planned
-     ▼
-[7. Report]  ── Structured findings + remediation                 🔲 planned
+[6. Report]             ── Structured findings + remediation      ✅ MVP done
 ```
 
 ### Security Pipeline Details
@@ -151,20 +160,18 @@ The pipeline transforms raw AST data into a security-focused representation:
 
 **Phase 2 — Hybrid Classification** (`classifier.py`, `entities.py`):
 - **Pass 1 (Pattern matching)**: Instantly matches primitives against glob lists (e.g. `*db.*` -> database sink) for fast pre-filtering.
-- **Pass 2 (Semantic LLM)**: Routes remaining functions to a local LLM client (Ollama/llama.cpp) to classify semantic intent where naming schemes are unpredictable.
+- **Pass 2 (Semantic LLM)**: Routes remaining functions to a local LLM client (Ollama/llama.cpp) using precise category descriptions and XML tag responses to classify semantic intent where naming schemes are unpredictable.
 - Translates classifications into standard security concepts: `ROUTE`, `SOURCE`, `SINK_DATABASE`, `SINK_SHELL`, `SINK_FILE`, `SINK_NETWORK`, `AUTH`, `VALIDATION`.
 
 **Phase 3 — Taint Propagation** (`taint.py`):
-- Traces variable taints language-agnostically along assignment lines, interprocedural argument boundaries, and return values.
+- Traces variable taints language-agnostically along assignment lines, interprocedural argument boundaries, and return values to build the taint graph flow paths.
 - Identifies if a tainted path is sanitized via validation functions before reaching a security sink.
 
-**Phase 4 — Rule Engine & Visualization** (`rules.py`, `security_graph.py`, `taint_graph.py`):
-- Evaluates taint paths against vulnerability rules:
-  - `sql-injection-via-concat`: String concatenation reaching a SQL/DB sink.
-  - `path-traversal`: Concatenated path strings reaching a file operation sink.
-  - `ssrf-dynamic-url`: Tainted input reaching a network request sink.
-  - `missing-authentication`: API routes lacking authentication middleware.
-- Renders results into interactive dependency graphs and step-by-step red-orange-green taint paths.
+**Phase 4 — LLM Vulnerability Detector** (`llm_detector.py`, `rules.py`):
+- Takes the candidate flow paths from the taint graph and identifies all files involved in each path.
+- Feeds the full source code of the involved files along with the taint flow trace to a specialized local LLM (`detector` model).
+- The LLM performs deep, context-aware analysis of the source code and data flow to verify whether a genuine, exploitable vulnerability exists, filtering out false positives.
+- If the detector model is offline or unavailable, it falls back to deterministic checks.
 
 **Design principle**: The graph answers *"How can untrusted input reach sensitive operations?"* rather than *"How is the code written?"*
 
@@ -209,6 +216,11 @@ ultron/
 │                         #   - Classifies by security role
 │                         #   - DOT/SVG render with role-based coloring
 │                         #   - Runs full security pipeline
+├── llm_client.py         # Local & Cloud LLM clients
+│                         #   - LocalLLMClient (Ollama, llama.cpp, OpenAI API)
+│                         #   - CloudLLMClient (Groq, Gemini, NVIDIA)
+│                         #   - create_llm_client() factory + fallback chain
+│                         #   - load_config() with deep merge for all keys
 ├── clones/               # Cloned repositories land here
 ├── workspace/            # Per-project data (manifests, AST, graphs)
 ├── README.md
@@ -218,9 +230,12 @@ ultron/
 ### LLM Strategy
 
 - **Default model:** Qwen2.5-7B or Gemma-2-9B, 4-bit quantized
-- **Runtime:** llama.cpp or Ollama, called over a local HTTP API
+- **Local runtime:** llama.cpp or Ollama, called over a local HTTP API
+- **Cloud runtime (experimental):** Groq, Gemini, or NVIDIA via REST API — enable with `llm_mode: cloud` or `--mode cloud`
+- **Fallback chain:** Cloud providers are tried in configurable order; if one fails or times out, the next is used automatically
 - **Finetuning (later):** SFT on (code slice, vulnerability class, finding) triples collected from the agent's own labeled runs
-- **Why local:** Code never leaves the machine, zero API cost, reproducible runs
+- **Why local (default):** Code never leaves the machine, zero API cost, reproducible runs
+- **Why cloud (opt-in):** Larger models (70B) without local GPU; useful for complex reasoning passes
 
 ---
 
@@ -325,6 +340,19 @@ python ultron.py https://github.com/<owner>/<repo>
 ```
 
 Requires Python 3, system `git`, and `pip install -r requirements.txt` (tree-sitter + language parsers). For SVG rendering, install Graphviz system binaries from https://graphviz.org/download/.
+
+**Cloud mode (optional):** Set API keys in `ultron_config.json`:
+```json
+{
+  "llm_mode": "cloud",
+  "api_keys": {
+    "groq": "gsk_...",
+    "gemini": "AI...",
+    "nvidia": "nvapi-..."
+  }
+}
+```
+Or override per-command: `python ultron.py --mode cloud https://github.com/user/repo`
 
 ---
 

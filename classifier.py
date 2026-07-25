@@ -3,8 +3,9 @@ import re
 import os
 from dataclasses import asdict
 from typing import Optional, List, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from features import FunctionFeatures
-from colors import CYAN, GRN, RST, YLW, DIM, RED
+from colors import CYAN, GRN, RST, YLW, DIM, RED, WHT
 
 
 SOURCE_PARAMS = {"req", "request", "payload", "body", "query", "params", "event"}
@@ -151,41 +152,63 @@ class PatternPass:
 def parse_response(response_text: str) -> Tuple[str, float]:
     valid_labels = {"SOURCE", "SINK_DATABASE", "SINK_SHELL", "SINK_FILE", "SINK_NETWORK", "AUTH", "VALIDATION", "ROUTE", "NONE"}
     
-    # Clean up text (do not strip underscores, as they are part of labels like SINK_DATABASE)
-    cleaned = re.sub(r'[*`#,()]', ' ', response_text).strip()
+    # Try parsing XML tags first
+    class_match = re.search(r'<classification>\s*([A-Z_]+)\s*</classification>', response_text, re.IGNORECASE)
+    conf_match = re.search(r'<confidence>\s*([\d.]+)\s*</confidence>', response_text)
     
-    detected_label = "NONE"
-    for word in cleaned.split():
-        word_upper = word.upper().strip()
-        if word_upper in valid_labels:
-            detected_label = word_upper
-            break
-            
-    if detected_label == "NONE":
-        cleaned_upper = cleaned.upper()
-        for label in valid_labels:
-            if label in cleaned_upper:
-                detected_label = label
-                break
-                
+    detected_label = None
     confidence = 0.80
-    floats = re.findall(r'\b\d+(?:\.\d+)?\b', cleaned)
-    for val in floats:
+    
+    if class_match:
+        val = class_match.group(1).upper().strip()
+        if val in valid_labels:
+            detected_label = val
+            
+    if conf_match:
         try:
-            f = float(val)
-            if 0.0 <= f <= 1.0:
-                confidence = f
-                break
+            val = float(conf_match.group(1).strip())
+            if 0.0 <= val <= 1.0:
+                confidence = val
         except ValueError:
             pass
             
+    # Fallback to the old word-matching logic if XML tags are missing
+    if not detected_label:
+        cleaned = re.sub(r'[*`#,()]', ' ', response_text).strip()
+        for word in cleaned.split():
+            word_upper = word.upper().strip()
+            if word_upper in valid_labels:
+                detected_label = word_upper
+                break
+                
+        if not detected_label:
+            cleaned_upper = cleaned.upper()
+            for label in valid_labels:
+                if label in cleaned_upper:
+                    detected_label = label
+                    break
+                    
+        if not detected_label:
+            detected_label = "NONE"
+            
+        # Extract confidence from words
+        floats = re.findall(r'\b\d+(?:\.\d+)?\b', cleaned)
+        for val in floats:
+            try:
+                f = float(val)
+                if 0.0 <= f <= 1.0:
+                    confidence = f
+                    break
+            except ValueError:
+                pass
+                
     if os.environ.get("ULTRON_DEBUG") == "1":
         print(f"  {DIM}[DEBUG] parse_response: parsed raw response to label: '{detected_label}', confidence: {confidence}{RST}")
-            
+        
     return detected_label, confidence
 
 class LLMPass:
-    PROMPT_TEMPLATE = """You are a security code analyzer. Given a function's features, classify its security role.
+    PROMPT_TEMPLATE = """<|think|> You are a security code analyzer. Given a function's features, classify its security role.
 
 FUNCTION: {name}
 FILE: {file_path}
@@ -197,20 +220,25 @@ CALLS MADE: {calls_made}
 IMPORTS IN FILE: {file_imports}
 CALLED BY: {calls_to_this}
 
-Classify this function as exactly ONE of:
-- SOURCE: receives attacker-controlled input (HTTP request data, user input, URL params)
-- SINK_DATABASE: writes to or queries a database
-- SINK_SHELL: executes system commands
-- SINK_FILE: reads/writes files with potentially untrusted paths
-- SINK_NETWORK: makes outbound HTTP/network requests
-- AUTH: performs authentication or authorization checks
-- VALIDATION: validates or sanitizes input
-- ROUTE: HTTP endpoint handler
-- NONE: not security-relevant
+Classify this function as exactly ONE of these security roles:
+- SOURCE: receives attacker-controlled input. This includes any function accepting HTTP requests, req/res objects, event payloads, webhook inputs, or parameters representing user-supplied data.
+- SINK_DATABASE: writes to, queries, or interacts with a database (SQL, NoSQL, ORMs). E.g., calls to query(), execute(), find(), save(), insert(), update(), delete(), or ORM methods.
+- SINK_SHELL: executes system or shell commands. E.g., spawn(), exec(), system(), popen(), child_process.
+- SINK_FILE: reads, writes, deletes, or manipulates files on the local filesystem.
+- SINK_NETWORK: makes outbound network requests (fetch, axios, http/https requests, request, got).
+- AUTH: performs authentication, authorization, token checks, logins, sign-ins, JWT signing/verification, permission validation, or access control checks.
+- VALIDATION: validates, sanitizes, escapes, checks, or parses inputs to ensure safety (e.g. zod parse, joi, yup, escape, sanitize, assert).
+- ROUTE: is an HTTP endpoint handler (e.g. GET/POST route handlers, API controllers, router methods).
+- NONE: not security-relevant. Use this if the function is a pure utility, helper, logger, UI component, or has no security significance.
 
-Respond with ONLY the classification and a confidence score 0.0-1.0.
-Format: CLASSIFICATION confidence
-Example: SINK_DATABASE 0.85"""
+Provide your reasoning, then output the final classification and confidence score enclosed in XML tags.
+Format:
+<classification>ROLE</classification>
+<confidence>SCORE</confidence>
+
+Example:
+<classification>SINK_DATABASE</classification>
+<confidence>0.85</confidence>"""
 
     def __init__(self, llm_client):
         self.llm_client = llm_client
@@ -229,11 +257,9 @@ Example: SINK_DATABASE 0.85"""
             print(f"\n{CYAN}==================== [DEBUG LLM INPUT: {features.name}] ===================={RST}")
             print(prompt)
             print(f"{CYAN}========================================================================{RST}")
-        response = self.llm_client.complete(prompt)
+        response = self.llm_client.complete(prompt, max_tokens=1024, stream=True)
         if os.environ.get("ULTRON_DEBUG") == "1":
-            print(f"{GRN}==================== [DEBUG LLM OUTPUT: {features.name}] ===================={RST}")
-            print(response)
-            print(f"{GRN}========================================================================={RST}\n")
+            print(f"{GRN}========================================================================{RST}\n")
         label, confidence = parse_response(response)
         return Classification(label, confidence, by="llm")
 
@@ -250,20 +276,27 @@ Example: SINK_DATABASE 0.85"""
             )
             for feat in features_list
         ]
-        if os.environ.get("ULTRON_DEBUG") == "1":
-            for feat, prompt in zip(features_list, prompts):
-                print(f"\n{CYAN}==================== [DEBUG LLM INPUT: {feat.name}] ===================={RST}")
-                print(prompt)
-                print(f"{CYAN}========================================================================{RST}")
-        responses = self.llm_client.batch_complete(prompts)
-        results = []
-        for feat, resp in zip(features_list, responses):
-            if os.environ.get("ULTRON_DEBUG") == "1":
-                print(f"{GRN}==================== [DEBUG LLM OUTPUT: {feat.name}] ===================={RST}")
-                print(resp)
-                print(f"{GRN}========================================================================={RST}\n")
-            label, confidence = parse_response(resp)
-            results.append(Classification(label, confidence, by="llm"))
+        total = len(features_list)
+        verbose = os.environ.get("ULTRON_DEBUG") == "1"
+
+        results = [None] * total
+        completed = 0
+
+        with ThreadPoolExecutor(max_workers=self.llm_client.num_workers) as executor:
+            future_map = {
+                executor.submit(self.llm_client.complete, prompts[i], 1024): i
+                for i in range(total)
+            }
+            for future in as_completed(future_map):
+                idx = future_map[future]
+                resp = future.result()
+                label, confidence = parse_response(resp)
+                results[idx] = Classification(label, confidence, by="llm")
+                completed += 1
+                if verbose:
+                    name = features_list[idx].name or "<anonymous>"
+                    print(f"  {GRN}[+]{RST} classified {WHT}{name}{RST} ({completed}/{total})")
+
         return results
 
 class HybridClassifier:

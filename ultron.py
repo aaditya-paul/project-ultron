@@ -11,9 +11,10 @@ from graph import load_ast, build_graph, save_graph, render_graph, show_graph_su
 from security_graph import show_security_graph_summary, build_security_graph
 from rules import show_findings
 from help import show_help
-from llm_client import LocalLLMClient, load_config
+from llm_client import LocalLLMClient, CloudLLMClient, load_config, create_llm_client, CLOUD_PROVIDER_NAMES
 from taint_graph import render_taint_graph
 from entities import extract_entities
+from llm_detector import run_llm_detection
 
 def print_terminal_graphs(dependency_graph, security_graph):
     # 1. Print Dependency Graph
@@ -96,30 +97,77 @@ def print_terminal_graphs(dependency_graph, security_graph):
 def run_analysis_and_report(name, ast_data, verbose=False):
     out_dir = os.path.join(WORKSPACE_DIR, name, "graph")
     os.makedirs(out_dir, exist_ok=True)
-    
-    print(f"  {CYAN}[*]{RST} initializing local LLM client...")
-    llm_client = LocalLLMClient(part="classifier")
-    if llm_client.is_available():
-        if llm_client._detect_api() == "ollama" and not llm_client.is_model_available():
-            print(f"  {YLW}[!]{RST} Ollama server active, but model {WHT}'{llm_client.model}'{RST} is not pulled.")
-            print(f"      To pull it, run: {GRN}ollama pull {llm_client.model}{RST}")
-            print(f"      Running in pattern-only mode (reduced accuracy).")
-            llm_client = None
+
+    config = load_config()
+    mode = os.environ.get("ULTRON_LLM_MODE") or config.get("llm_mode", "local")
+
+    print(f"  {CYAN}[*]{RST} initializing {mode} LLM client for classification...")
+    classifier_client = create_llm_client(part="classifier")
+    detector_client = None
+
+    if mode == "cloud":
+        if classifier_client.is_available():
+            chain = classifier_client._get_chain()
+            providers = ", ".join(CLOUD_PROVIDER_NAMES.get(p, p) for p in chain)
+            print(f"  {GRN}[+]{RST} cloud providers configured: {WHT}{providers}{RST} (model: {classifier_client.model})")
+            print(f"  {CYAN}[*]{RST} initializing cloud LLM client for vulnerability detection...")
+            detector_client = create_llm_client(part="detector")
+            if detector_client.is_available():
+                dchain = detector_client._get_chain()
+                dproviders = ", ".join(CLOUD_PROVIDER_NAMES.get(p, p) for p in dchain)
+                print(f"  {GRN}[+]{RST} cloud providers configured for detection: {WHT}{dproviders}{RST} (model: {detector_client.model})")
+            else:
+                print(f"  {YLW}[!]{RST} no API keys configured for detector — using deterministic rules")
         else:
-            print(f"  {GRN}[+]{RST} local LLM server active: {WHT}{llm_client.base_url}{RST} (model: {llm_client.model})")
+            print(f"  {YLW}[!]{RST} no cloud providers configured — set api_keys in config")
+            print(f"  {YLW}[!]{RST} running in pattern-only mode (reduced accuracy)")
+            classifier_client = None
     else:
-        print(f"  {YLW}[!]{RST} no LLM available — classification is pattern-only (reduced accuracy)")
-        llm_client = None
+        if classifier_client.is_available():
+            if classifier_client._detect_api() == "ollama" and not classifier_client.is_model_available():
+                print(f"  {YLW}[!]{RST} Ollama server active, but model {WHT}'{classifier_client.model}'{RST} is not pulled.")
+                print(f"      To pull it, run: {GRN}ollama pull {classifier_client.model}{RST}")
+                print(f"      Running in pattern-only mode (reduced accuracy).")
+                classifier_client = None
+            else:
+                print(f"  {GRN}[+]{RST} local LLM server active for classification: {WHT}{classifier_client.base_url}{RST} (model: {classifier_client.model})")
+                print(f"  {CYAN}[*]{RST} initializing local LLM client for vulnerability detection...")
+                detector_client = create_llm_client(part="detector")
+                if detector_client.is_available() and detector_client._detect_api() == "ollama" and not detector_client.is_model_available():
+                    print(f"  {YLW}[!]{RST} Ollama server active, but detector model {WHT}'{detector_client.model}'{RST} is not pulled.")
+                    print(f"      To pull it, run: {GRN}ollama pull {detector_client.model}{RST}")
+                    print(f"      Using deterministic flow rules (fallback).")
+                    detector_client = None
+                elif detector_client.is_available():
+                    print(f"  {GRN}[+]{RST} local LLM server active for vulnerability detection: {WHT}{detector_client.base_url}{RST} (model: {detector_client.model})")
+        else:
+            print(f"  {YLW}[!]{RST} no LLM available — classification is pattern-only (reduced accuracy)")
+            classifier_client = None
 
     print(f"  {CYAN}[*]{RST} running hybrid security analysis...")
-    pipeline = run_security_pipeline(ast_data, llm_client, verbose=verbose)
+    pipeline = run_security_pipeline(ast_data, classifier_client, verbose=verbose)
+    
+    # Run LLM vulnerability detection on flows
+    final_findings = []
+    
+    # Extract route/authentication/etc. deterministic findings (not unvalidated flow-based ones, to let LLM handle flow verification)
+    route_findings = [f for f in pipeline["findings"] if f["rule"] in ("missing-authentication", "database-write-without-validation", "exposed-network-request")]
+    final_findings.extend(route_findings)
+    
+    if detector_client and detector_client.is_available():
+        llm_findings = run_llm_detection(name, pipeline["security_graph"], detector_client, verbose=verbose)
+        final_findings.extend(llm_findings)
+    else:
+        # Fallback: keep all deterministic findings if LLM detector isn't available
+        flow_findings = [f for f in pipeline["findings"] if f["rule"] not in ("missing-authentication", "database-write-without-validation", "exposed-network-request")]
+        final_findings.extend(flow_findings)
     
     spath = os.path.join(out_dir, "security_graph.json")
     with open(spath, "w", encoding="utf-8") as f:
         json.dump({
             "entities": pipeline["entities"],
             "security_graph": pipeline["security_graph"],
-            "findings": pipeline["findings"],
+            "findings": final_findings,
         }, f, indent=2, ensure_ascii=False)
     print(f"  {DIM}[*]{RST} security graph saved -> {WHT}{spath}{RST}")
 
@@ -132,7 +180,7 @@ def run_analysis_and_report(name, ast_data, verbose=False):
         print(f"  {DIM}[*]{RST} classification: {GRN}{pattern_count}{RST} pattern-classified, {GRN}{llm_count}{RST} LLM-classified, {GRN}{unclassified_count}{RST} unclassified")
 
     show_security_graph_summary(pipeline["security_graph"])
-    show_findings(pipeline["findings"])
+    show_findings(final_findings)
 
     if os.environ.get("ULTRON_VISUALISE") == "1":
         dependency_graph = build_graph(ast_data)
@@ -235,6 +283,7 @@ def cmd_config(args):
         # Show configuration
         print(f"\n  {CYAN}{BOLD}ULTRON CONFIGURATION{RST}")
         print(f"  {DIM}──────────────────────────────────────────────────{RST}")
+        print(f"    {BOLD}llm_mode{RST}     : {WHT}{config.get('llm_mode', 'local')}{RST}")
         print(f"    {BOLD}llm_url{RST}      : {WHT}{config.get('llm_url')}{RST}")
         print(f"    {BOLD}llm_model{RST}    : {WHT}{config.get('llm_model')}{RST}")
         print(f"    {BOLD}temperature{RST}  : {WHT}{config.get('temperature')}{RST}")
@@ -244,18 +293,31 @@ def cmd_config(args):
         print(f"    {BOLD}version{RST}      : {WHT}{config.get('version')}{RST}")
         print(f"    {BOLD}verbose{RST}      : {WHT}{config.get('verbose', False)}{RST}")
         print(f"    {BOLD}visualise{RST}    : {WHT}{config.get('visualise', False)}{RST}")
+
+        # Display cloud provider info
+        api_keys = config.get("api_keys", {})
+        configured = [k for k, v in api_keys.items() if v]
+        if configured:
+            print(f"\n  {CYAN}{BOLD}CLOUD PROVIDERS{RST}")
+            print(f"  {DIM}──────────────────────────────────────────────────{RST}")
+            print(f"    {BOLD}api_keys{RST}     : {WHT}{', '.join(configured)}{RST}")
+            chain = config.get("cloud_chain", {})
+            for part, providers in chain.items():
+                print(f"    {BOLD}{part:<12}{RST} : {WHT}{' -> '.join(providers)}{RST}")
+            models = config.get("cloud_models", {})
+            for prov, model in models.items():
+                if prov in configured:
+                    print(f"    {BOLD}{prov:<12}{RST} : {WHT}{model}{RST}")
         
         # Display parts overrides
         print(f"\n  {CYAN}{BOLD}SPECIFIC LLM PARTS OVERRIDES{RST}")
         print(f"  {DIM}──────────────────────────────────────────────────{RST}")
-        overrides = config.setdefault("model_overrides", {
-            "classifier": "qwen2.5-coder:3b",
-            "detector": "qwen2.5-coder:3b",
-            "exploiter": "qwen2.5-coder:3b",
-            "reporter": "qwen2.5-coder:3b"
-        })
-        for part, model in overrides.items():
-            print(f"    {BOLD}{part:<12}{RST} : {WHT}{model}{RST}")
+        overrides = config.get("model_overrides", {})
+        if overrides:
+            for part, model in overrides.items():
+                print(f"    {BOLD}{part:<12}{RST} : {WHT}{model}{RST}")
+        else:
+            print(f"    {DIM}none set{RST}")
             
         print(f"\n  {DIM}To change a model override, run: {GRN}config <part> <model-name>{RST}")
         print(f"  {DIM}To change a setting, run: {GRN}config <setting> <value>{RST} (e.g. config visualise true)")
@@ -267,18 +329,22 @@ def cmd_config(args):
             "llm_url": "http://localhost:11434",
             "llm_model": "qwen2.5-coder:3b",
             "temperature": 0.1,
-            "max_tokens": 100,
+            "max_tokens": 1024,
             "num_workers": 5,
-            "timeout": 15.0,
+            "timeout": 60.0,
             "version": "8.0.0",
             "verbose": False,
             "visualise": False,
+            "llm_mode": "local",
             "model_overrides": {
                 "classifier": "qwen2.5-coder:3b",
                 "detector": "qwen2.5-coder:3b",
                 "exploiter": "qwen2.5-coder:3b",
                 "reporter": "qwen2.5-coder:3b"
-            }
+            },
+            "api_keys": {"groq": "", "gemini": "", "nvidia": ""},
+            "cloud_chain": {"default": ["groq", "gemini", "nvidia"]},
+            "cloud_models": {"groq": "llama-3.3-70b-versatile", "gemini": "gemini-2.0-flash", "nvidia": "meta/llama-3.1-8b-instruct"}
         }
         try:
             with open(config_path, "w", encoding="utf-8") as f:
@@ -297,7 +363,7 @@ def cmd_config(args):
     val_str = args[1]
     
     valid_parts = {"classifier", "detector", "exploiter", "reporter", "default"}
-    valid_settings = {"visualise", "visualize", "verbose", "temperature", "max_tokens", "timeout", "num_workers", "llm_url"}
+    valid_settings = {"visualise", "visualize", "verbose", "temperature", "max_tokens", "timeout", "num_workers", "llm_url", "llm_mode"}
     
     if part not in valid_parts and part not in valid_settings:
         print(f"  {RED}[-]{RST} invalid part or setting '{part}'. Valid parts: {', '.join(valid_parts)}, Settings: {', '.join(valid_settings)}")
@@ -329,6 +395,13 @@ def cmd_config(args):
             except ValueError:
                 print(f"  {RED}[-]{RST} invalid integer value for {part}: {val_str}")
                 return
+        elif part == "llm_mode":
+            val = val_str.lower()
+            if val not in ("local", "cloud"):
+                print(f"  {RED}[-]{RST} invalid llm_mode '{val_str}'. Use 'local' or 'cloud'.")
+                return
+            config[part] = val
+            print(f"  {GRN}[+]{RST} setting {BOLD}llm_mode{RST} updated to {WHT}{val}{RST}")
         elif part == "llm_url":
             config[part] = val_str
             print(f"  {GRN}[+]{RST} setting {BOLD}{part}{RST} updated to {WHT}{val_str}{RST}")
@@ -387,6 +460,22 @@ def interactive():
         else:
             if "ULTRON_VISUALISE" in os.environ:
                 del os.environ["ULTRON_VISUALISE"]
+
+        # Check for --mode flag in interactive line
+        mode_flags = {"--mode"}
+        mode_idx = None
+        for i, p in enumerate(parts):
+            if p in mode_flags and i + 1 < len(parts):
+                mode_val = parts[i + 1].lower()
+                if mode_val in ("local", "cloud"):
+                    os.environ["ULTRON_LLM_MODE"] = mode_val
+                    print(f"  {CYAN}[*]{RST} LLM mode set to {WHT}{mode_val}{RST}")
+                    mode_idx = i
+                break
+        if mode_idx is not None:
+            parts = parts[:mode_idx] + parts[mode_idx + 2:]
+            line = " ".join(parts)
+            cmd = parts[0].lower() if parts else ""
 
         if cmd in ("help", "--help", "-h"):
             show_help()
@@ -455,6 +544,19 @@ def main():
         os.environ["ULTRON_GLOBAL_VISUALISE"] = "1"
         os.environ["ULTRON_VISUALISE"] = "1"
         sys.argv = [arg for arg in sys.argv if arg not in vis_flags]
+
+    # Check for --mode flag in CLI args
+    mode_flags = {"--mode"}
+    mode_idx = None
+    for i, arg in enumerate(sys.argv):
+        if arg in mode_flags and i + 1 < len(sys.argv):
+            mode_val = sys.argv[i + 1].lower()
+            if mode_val in ("local", "cloud"):
+                os.environ["ULTRON_LLM_MODE"] = mode_val
+                mode_idx = i
+                break
+    if mode_idx is not None:
+        sys.argv = sys.argv[:mode_idx] + sys.argv[mode_idx + 2:]
 
     banner()
 

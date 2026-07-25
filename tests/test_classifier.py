@@ -12,8 +12,9 @@ class MockLLMClient:
     def __init__(self, response_text):
         self.response_text = response_text
         self.calls = []
+        self.num_workers = 1
 
-    def complete(self, prompt, max_tokens=100):
+    def complete(self, prompt, max_tokens=100, stream=False):
         self.calls.append(prompt)
         return self.response_text
 
@@ -78,6 +79,11 @@ class TestClassifier(unittest.TestCase):
         self.assertEqual(res.by, "pattern")
 
     def test_parse_response(self):
+        # XML tags parsing
+        label, conf = parse_response("Based on analysis:\n<classification>SINK_DATABASE</classification>\n<confidence>0.95</confidence>")
+        self.assertEqual(label, "SINK_DATABASE")
+        self.assertEqual(conf, 0.95)
+
         label, conf = parse_response("SINK_DATABASE 0.85")
         self.assertEqual(label, "SINK_DATABASE")
         self.assertEqual(conf, 0.85)

@@ -1,10 +1,11 @@
 {
+  "llm_mode": "local",
   "llm_url": "http://localhost:11434",
   "llm_model": "gemma4:e2b",
   "temperature": 0.1,
-  "max_tokens": 100,
+  "max_tokens": 10240,
   "num_workers": 5,
-  "timeout": 45.0,
+  "timeout": 60.0,
   "version": "8.0.0",
   "verbose": false,
   "visualise": true,
@@ -13,5 +14,18 @@
     "detector": "gemma4:e2b",
     "exploiter": "gemma4:e2b",
     "reporter": "gemma4:e2b"
+  },
+  "api_keys": {
+    "groq": "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",
+    "gemini": "AQ.Ab8RN6IT3eP85TCOxP9OSLozMFhP8oTzB46eNAMxYWsOzNXbsg",
+    "nvidia": "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"
+  },
+  "cloud_chain": {
+    "default": ["groq", "gemini", "nvidia"]
+  },
+  "cloud_models": {
+    "groq": "llama-3.3-70b-versatile",
+    "gemini": "gemini-2.5-flash",
+    "nvidia": "qwen/qwen3-next-80b-a3b-instruct"
   }
 }
