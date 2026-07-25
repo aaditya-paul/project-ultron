@@ -264,4 +264,7 @@ def api_health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8742)
+    on_render = "PORT" in os.environ
+    host = os.environ.get("HOST", "0.0.0.0" if on_render else "127.0.0.1")
+    port = int(os.environ["PORT"]) if on_render else 8742
+    uvicorn.run(app, host=host, port=port)

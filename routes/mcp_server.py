@@ -239,10 +239,8 @@ def main():
     host = os.environ.get("HOST", "0.0.0.0" if on_render else "127.0.0.1")
 
     if args.sse:
-        mcp.settings.port = port
-        mcp.settings.host = host
         print(f"Ultron MCP server starting on SSE http://{host}:{port}", file=sys.stderr)
-        mcp.run(transport="sse")
+        mcp.run(transport="sse", host=host, port=port)
     else:
         mcp.run(transport="stdio")
 
