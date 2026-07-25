@@ -3,21 +3,26 @@ import json
 import re
 
 from colors import DIM, WHT, CYAN, GRN, YLW, RED, RST
-
-SECURITY_ROLES = {
-    "auth":         ("auth", "login", "signin", "signup", "logout", "verifytoken", "authenticate", "authorize", "middleware", "guard"),
-    "database":     ("find", "create", "update", "delete", "upsert", "query", "insert", "save", "select", "join", "where", "orderby", "groupby", "prisma", "knex", "mongoose", "sequelize"),
-    "endpoint":     ("handler", "route", "controller", "api", "router", "get", "post", "put", "patch", "delete", "head", "options"),
-    "external_req": ("fetch", "axios", "request", "ajax", "http.", "https.", "got", "superagent"),
-    "file_op":      ("readfile", "writefile", "openfile", "unlink", "readdir", "fs.", "file.", "stream"),
-    "shell_exec":   ("exec", "spawn", "child_process", "shell", "system", "popen", "execsync"),
-    "jwt":          ("jwt", "signtoken", "verifytoken", "jsonwebtoken"),
-    "crypto":       ("encrypt", "decrypt", "hash", "cipher", "bcrypt", "sha", "md5", "crypto"),
-    "secrets":      ("secret", "password", "key", "credential", "env."),
-    "validation":   ("validate", "sanitize", "escape", "assert", "zod", "yup", "joi"),
-}
+from entities import extract_entities
+from security_graph import build_security_graph, show_security_graph_summary
+from rules import run_rules, show_findings
 
 NOISE_NAMES = {"async", "function", "export", "default", "anonymous", "lambda", "handler", ""}
+
+def _map_label_to_role(label):
+    mapping = {
+        "SOURCE": "other",
+        "SINK_DATABASE": "database",
+        "SINK_SQL": "database",
+        "SINK_SHELL": "shell_exec",
+        "SINK_FILE": "file_op",
+        "SINK_NETWORK": "external_req",
+        "AUTH": "auth",
+        "VALIDATION": "validation",
+        "ROUTE": "endpoint",
+        "NONE": "other"
+    }
+    return mapping.get(label, "other")
 
 def load_ast(workspace_dir, repo_name):
     path = os.path.join(workspace_dir, repo_name, "ast", "ast.json")
@@ -38,17 +43,6 @@ def _is_noise(fn):
     if name.lower() in NOISE_NAMES:
         return True
     return False
-
-def _infer_security_role(fn, fpath, imports):
-    name = fn.get("name", "")
-    lowered = f"{name} {fpath}".lower()
-    imports_text = " ".join(imports).lower() if imports else ""
-
-    for role, patterns in SECURITY_ROLES.items():
-        for pat in patterns:
-            if pat in lowered or pat in imports_text:
-                return role
-    return "other"
 
 def resolve_import(imp, known_files):
     imp_clean = imp.strip().strip('"').strip("'")
@@ -105,6 +99,19 @@ def _classify_layer(fpath):
     return "shared"
 
 def build_graph(ast_data):
+    from features import extract_features
+    from classifier import HybridClassifier
+
+    # Classify all functions in the AST first to assign dependency roles
+    features_list = extract_features(ast_data)
+    classifier = HybridClassifier(None) # pattern-only for graph decoration
+    classified = classifier.classify_all(features_list)
+
+    fnid_to_role = {}
+    for feat, res in classified:
+        fnid = f"fn:{feat.file_path}::{feat.name}"
+        fnid_to_role[fnid] = _map_label_to_role(res.label)
+
     known_files = list(ast_data["files"].keys())
     file_nodes = {}
     func_nodes = {}
@@ -126,7 +133,7 @@ def build_graph(ast_data):
             if _is_noise(fn):
                 continue
             fnid = f"fn:{fpath}::{fn['name']}"
-            role = _infer_security_role(fn, fpath, info.get("imports", []))
+            role = fnid_to_role.get(fnid, "other")
             func_nodes[fnid] = {
                 "id": fnid,
                 "type": "function",
@@ -158,10 +165,11 @@ def build_graph(ast_data):
             if _is_noise(fn):
                 continue
             fnid = f"fn:{fpath}::{fn['name']}"
-            fn_lines = set(range(fn["line"], fn.get("end_line", fn["line"]) + 1))
 
             for call in info["calls"]:
-                call_name = call.split("(")[0].strip().split(".")[0].split()[-1] if "(" in call else call.strip()
+                call_text = call["text"] if isinstance(call, dict) else call
+                call_line = call.get("line", 0) if isinstance(call, dict) else 0
+                call_name = call_text.split("(")[0].strip().split(".")[0].split()[-1] if "(" in call_text else call_text.strip()
                 if not call_name or call_name in ("if", "for", "while", "return", "import", "from", "pass", "def", "class", "const", "let", "var", "function"):
                     continue
 
@@ -205,6 +213,17 @@ def save_graph(workspace_dir, repo_name, graph_data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(graph_data, f, indent=2, ensure_ascii=False)
     return path
+
+def run_security_pipeline(ast_data, llm_client=None, verbose=False):
+    entities, known_funcs = extract_entities(ast_data, llm_client)
+    security_graph = build_security_graph(entities, known_funcs, ast_data)
+    findings = run_rules(security_graph)
+
+    return {
+        "entities": entities,
+        "security_graph": security_graph,
+        "findings": findings,
+    }
 
 def render_graph(graph_data, output_path):
     try:

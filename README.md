@@ -6,11 +6,11 @@ A multi-agent system that finds security flaws in source code repositories by co
 
 ## Current Status
 
-**Phase: AST Analysis & Dependency Graph complete** — cloning, language/framework detection, AST parsing (tree-sitter), dependency graph building, and DOT/SVG visualization are implemented. Taint tracking and security agents are coming next.
+**Phase 2: Hybrid Classifier & Taint Propagation complete** — cloning, AST parsing, two-pass hybrid classifier (regex patterns + local LLM), variables-level data-flow taint propagation, rule engine, verbose tracing, and dependency/taint visualizations (SVG) are fully implemented. Next step: multi-agent security reasoning (Phase 3).
 
 ```
-[GitHub URL]  →  [1. Clone]  →  [2. AST]  →  [3. Flow Graph]  →  (Taint · Agents · Viz · Report)
-                   ▲ done        ▲ done       ▲ done              ▲ planned (in order)
+[GitHub URL]  →  [1. Clone]  →  [2. AST]  →  [3. Hybrid Classifier]  →  [4. Taint Tracking]  →  (Agents · Report)
+                   ▲ done        ▲ done       ▲ done                  ▲ done              ▲ planned
 ```
 
 ---
@@ -21,18 +21,27 @@ A multi-agent system that finds security flaws in source code repositories by co
 # Run interactively
 python ultron.py
 
-# Pass URL directly
-python ultron.py https://github.com/user/repo
+# Pass URL directly (supports verbose tracing)
+python ultron.py https://github.com/user/repo [--verbose | -v]
 
 # List cloned repositories
 python ultron.py list
 
-# Scan an already-cloned repository
-python ultron.py scan <repo-name>
+# Scan an already-cloned repository (supports verbose tracing)
+python ultron.py scan <repo-name> [--verbose | -v]
 
-# Build and export dependency graph visualization
-python ultron.py visualise <repo-name>
-python ultron.py visualize <repo-name>
+# Build and export dependency/taint graph visualizations (supports verbose tracing)
+python ultron.py visualise <repo-name> [--verbose | -v]
+python ultron.py visualize <repo-name> [--verbose | -v]
+
+# View/update configuration settings & model overrides
+python ultron.py config
+python ultron.py config <part/setting> <value>
+# e.g., python ultron.py config classifier llama3.1:8b
+# e.g., python ultron.py config visualise true
+
+# Reset configuration to defaults
+python ultron.py config reset
 
 # Delete a cloned repository
 python ultron.py delete <repo-name>
@@ -45,14 +54,43 @@ python ultron.py --help
 **Interactive commands:**
 | Input | Action |
 |---|---|
-| `<repository-url>` | clone the target |
+| `<repository-url> [--verbose]` | clone the target |
 | `list` | list cloned repositories |
-| `scan <repo-name>` | scan an already-cloned repository |
+| `scan <repo-name> [--verbose]` | scan an already-cloned repository |
 | `delete <repo-name>` | delete a cloned repository |
 | `delete --all` | delete all cloned repositories |
-| `visualise <name>` / `visualize <name>` | build and export dependency graph (DOT/SVG) |
+| `visualise <name> [--verbose]` / `visualize <name> [--verbose]` | build/export dependency and taint graphs (DOT/SVG) and print text-based terminal graphs |
+| `config` | show current configuration |
+| `config <part/setting> <value>` | change a model override or setting (e.g. `config visualise true`) |
+| `config reset` | reset configuration to default settings |
 | `help` | show usage info |
 | `exit` / `quit` / `bye` | exit the program |
+
+### Configuration
+Ultron maintains configuration settings in `ultron_config.json`. You can manage settings via the `config` command:
+- **Model Overrides**: Change the model for specific parts of the analysis:
+  - `classifier` (local model used by the hybrid classifier)
+  - `detector` (local model used by the vulnerability detector)
+  - `exploiter` (local model used by the exploitation agent)
+  - `reporter` (local model used by the reporter agent)
+  - `default` (fallback model used by all parts)
+- **General Settings**:
+  - `visualise` (enable or disable printing text-based terminal graphs on scans by default)
+  - `verbose` (turn on verbose tracing by default)
+  - `temperature` (LLM generation temperature)
+  - `max_tokens` (LLM max tokens per response)
+  - `timeout` (LLM API request timeout in seconds)
+  - `num_workers` (number of parallel worker threads for batch LLM analysis)
+  - `llm_url` (local LLM base URL, e.g. `http://localhost:11434`)
+- **Resetting defaults**: Run `config reset` to restore all options to original system defaults.
+
+### Verbose Tracing
+Append `--verbose`, `--debug`, `-v`, or `-d` to commands to see:
+- Manual glob/regex pattern-matching findings (reasons for pattern classification).
+- Local LLM input prompts and raw completion outputs.
+- Raw LLM parser outputs and confidence scores.
+- LLM endpoint connection timeouts or errors.
+- Detailed variable taint propagation stages (assignments, argument passing, return values, sanitizer logs).
 
 If a repository already exists locally, you'll be prompted to pull latest changes instead of re-cloning.
 
@@ -77,40 +115,60 @@ The program **never exits on errors** — clone failures, invalid commands, miss
 
 ---
 
-## How It Works (MVP)
+## How It Works (Current)
 
 ```
 [GitHub URL]
      │
      ▼
-[1. Clone]  ── git clone via subprocess into clones/       ✅ MVP done
+[1. Clone]  ── git clone via subprocess into clones/              ✅ MVP done
      │
      ▼
-[2. AST Analysis]  ── Parse every supported source file    ✅ MVP done
-     │                  (JS/TS, Python, Go, Java…)
+[2. AST Parsing]  ── tree-sitter: functions, calls,               ✅ MVP done
+     │               classes, imports, assignments, returns
      ▼
-[3. Security Graph]  ── Security-focused graph: filters anonymous  ✅ MVP done
-     │                   callbacks, JSX noise, self-calls; classifies
-     │                   functions by security role & layer
+[3. Hybrid Classifier]  ── Pattern Pass + Local LLM Pass          ✅ MVP done
+     │                      Classifies functions into security roles
      ▼
-[4. Taint Graph]  ── Track user input → sanitizers → sinks 🔲 planned
+[4. Taint Propagation]  ── Language-agnostic data flow taint      ✅ MVP done
+     │                      Source → variable assignments → sinks
      ▼
-[5. Security Agents]  ── 6 specialized agents              🔲 planned
+[5. Rule Engine]  ── Deterministic checks on flows                ✅ MVP done
+     │                 missing auth, concat SQLi, path traversal
      ▼
-[6. Visualization]  ── Dependency graph (DOT/SVG)         ✅ MVP done
+[6. LLM Investigation]  ── Multi-agent reasoning on paths         🔲 planned
      ▼
-[7. Report]  ── Aggregated findings + remediation          🔲 planned
+[7. Report]  ── Structured findings + remediation                 🔲 planned
 ```
 
-### Security Graph Model
+### Security Pipeline Details
 
-The dependency graph is built with a **security-first** philosophy:
+The pipeline transforms raw AST data into a security-focused representation:
 
-- **Noise filtering**: Anonymous lambdas, JSX callbacks, array iteration callbacks (`map`/`filter`/`reduce`/`forEach`), and self-call edges are excluded
-- **Security role classification**: Each function is tagged as one of: `auth`, `database`, `endpoint`, `external_req`, `file_op`, `shell_exec`, `jwt`, `crypto`, `secrets`, `validation`, or `other`
-- **Layer separation**: Functions are grouped by `frontend`, `backend`, or `shared` based on file path patterns
-- **Role-colored visualization**: SVG nodes are color-coded by security role (pink = auth, green = database, blue = endpoint, etc.)
-- **JSON export**: Full graph with `security_roles` and `layers` breakdowns for LLM consumption
+**Phase 1 — AST & Feature Extraction** (`parser.py`, `features.py`):
+- Scans AST data across 12 languages to extract function definitions, signatures, imports, calls, local assignments, return expressions, and field accesses.
+- Packs these structural features into lightweight context vectors for the classifier.
+
+**Phase 2 — Hybrid Classification** (`classifier.py`, `entities.py`):
+- **Pass 1 (Pattern matching)**: Instantly matches primitives against glob lists (e.g. `*db.*` -> database sink) for fast pre-filtering.
+- **Pass 2 (Semantic LLM)**: Routes remaining functions to a local LLM client (Ollama/llama.cpp) to classify semantic intent where naming schemes are unpredictable.
+- Translates classifications into standard security concepts: `ROUTE`, `SOURCE`, `SINK_DATABASE`, `SINK_SHELL`, `SINK_FILE`, `SINK_NETWORK`, `AUTH`, `VALIDATION`.
+
+**Phase 3 — Taint Propagation** (`taint.py`):
+- Traces variable taints language-agnostically along assignment lines, interprocedural argument boundaries, and return values.
+- Identifies if a tainted path is sanitized via validation functions before reaching a security sink.
+
+**Phase 4 — Rule Engine & Visualization** (`rules.py`, `security_graph.py`, `taint_graph.py`):
+- Evaluates taint paths against vulnerability rules:
+  - `sql-injection-via-concat`: String concatenation reaching a SQL/DB sink.
+  - `path-traversal`: Concatenated path strings reaching a file operation sink.
+  - `ssrf-dynamic-url`: Tainted input reaching a network request sink.
+  - `missing-authentication`: API routes lacking authentication middleware.
+- Renders results into interactive dependency graphs and step-by-step red-orange-green taint paths.
+
+**Design principle**: The graph answers *"How can untrusted input reach sensitive operations?"* rather than *"How is the code written?"*
+
+**Language generalization**: Entity detection uses file-path patterns, function-parameter naming conventions, and call-text regex that work across Python, JavaScript/TypeScript, Go, Rust, Java, and other languages supported by tree-sitter.
 
 ### Visual Representation (Per-Agent Peace-of-Mind View)
 
@@ -135,11 +193,22 @@ ultron/
 ├── detector.py           # language + framework detection
 ├── help.py               # help text display
 ├── parser.py             # Tree-sitter AST parsing (multi-language)
-├── graph.py              # Security-focused graph builder
+├── entities.py           # Security entity extraction
+│                         #   - ROUTE, SOURCE, SINK_*, AUTH, VALIDATION entities
+│                         #   - Language-generalized pattern matching
+├── security_graph.py     # Security graph construction
+│                         #   - Source → validation → sink flow chains
+│                         #   - Auth subgraph (protected/unprotected routes)
+│                         #   - Database subgraph (read/write operations)
+├── rules.py              # Deterministic rule engine (pre-LLM)
+│                         #   - Unvalidated source-to-sink flows
+│                         #   - Missing authentication on routes
+│                         #   - Exposed network requests
+├── graph.py              # Dependency graph builder + orchestrator
 │                         #   - Filters anonymous/noise functions
 │                         #   - Classifies by security role
-│                         #   - Separates frontend/backend layers
 │                         #   - DOT/SVG render with role-based coloring
+│                         #   - Runs full security pipeline
 ├── clones/               # Cloned repositories land here
 ├── workspace/            # Per-project data (manifests, AST, graphs)
 ├── README.md
@@ -163,6 +232,9 @@ ultron/
 | CLI | `argparse` (manual) | Typer / Rich |
 | Git | `subprocess` → `git clone` | — |
 | AST | `tree-sitter` (multi-language) | — |
+| Entity Extraction | Pattern-based (file path, param, call text) | ML-based classification |
+| Security Graph | Flow-based (source → validation → sink) | Taint tracking |
+| Rules | Deterministic (pre-LLM) | ML-augmented rules |
 | LLM runtime | — | Ollama / llama.cpp |
 | Viz | Graphviz DOT / SVG (role-colored) | React + D3 / Cytoscape.js |
 | Report | — | Markdown + JSON |
@@ -171,21 +243,35 @@ ultron/
 
 ## MVP Scope
 
-**Phase 1 — Clone, Detect, Parse & Security Graph (current):**
+**Phase 1 — Security Analysis Pipeline (current):**
 - GitHub URL → clone via `git clone`
 - Existing repo detection with pull prompt
 - Language detection (Python, JS/TS, Go, Rust, Java, PHP, Ruby, C#, C/C++, …)
 - Framework detection (React, Next.js, Django, Flask, Spring Boot, Rails, …)
 - Workspace saved to `workspace/<project>/manifest.json` for cross-session use
-- Tree-sitter AST parsing — per-file functions, classes, imports, calls
-- **Security-focused dependency graph:**
-  - Filters anonymous lambdas, JSX callbacks, array iteration noise
-  - Skips self-call edges
-  - Classifies functions by security role (auth, database, endpoint, crypto, etc.)
-  - Separates frontend/backend/shared layers
-  - Node colors by security role in SVG visualization
-- Graphviz DOT/SVG export with role-based coloring
-- `visualise` / `visualize` command
+- Tree-sitter AST parsing — per-file functions, classes, imports, calls (with line scoping)
+- **Security Entity Extraction** (`entities.py`):
+  - ROUTE entities from API file paths + HTTP method functions
+  - SOURCE entities from request parameter access patterns
+  - SINK entities (database, shell, file, network, SQL)
+  - Auth middleware, JWT, validation entities
+  - Language-generalized pattern matching
+- **Security Graph Construction** (`security_graph.py`):
+  - Source → validation → sink data-flow paths
+  - Interprocedural call tracking
+  - Auth subgraph (protected vs unprotected routes)
+  - Database subgraph (read/write operations)
+  - Network subgraph (SSRF surface)
+- **Deterministic Rule Engine** (`rules.py`):
+  - Pre-LLM checks: missing auth, unvalidated flows, DB write without validation
+  - Structured findings with severity and recommendations
+  - Extensible rule registry
+- **Dependency Graph** (`graph.py`):
+  - Noise-filtered function graph (anonymous lambdas, JSX callbacks excluded)
+  - Security role classification + layer separation
+  - Graphviz DOT/SVG export with role-based coloring
+  - Orchestrates full security pipeline
+- `visualise` / `visualize` command runs entire pipeline
 - List cloned repositories
 - Delete individual or all repositories (cleans clone + workspace)
 - Interactive CLI with retry on failure — **never exits on errors**

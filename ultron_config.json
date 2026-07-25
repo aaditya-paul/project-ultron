@@ -1,0 +1,17 @@
+{
+  "llm_url": "http://localhost:11434",
+  "llm_model": "gemma4:e2b",
+  "temperature": 0.1,
+  "max_tokens": 100,
+  "num_workers": 5,
+  "timeout": 15.0,
+  "version": "8.0.0",
+  "verbose": false,
+  "visualise": false,
+  "model_overrides": {
+    "classifier": "gemma4:e2b",
+    "detector": "gemma4:e2b",
+    "exploiter": "gemma4:e2b",
+    "reporter": "gemma4:e2b"
+  }
+}

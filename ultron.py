@@ -1,13 +1,142 @@
 import sys
 import os
+import json
 
-from colors import CYAN, RED, GRN, WHT, DIM, YLW, RST
+from colors import CYAN, RED, GRN, WHT, DIM, YLW, RST, BOLD
 from banner import banner
 from cloner import clone_repo, list_repos, delete_repo, delete_all_repos, repo_exists, repo_path, extract_repo_name, get_remote_url
 from detector import analyze_project, show_detected_types, save_workspace_manifest, WORKSPACE_DIR
 from parser import parse_repo, save_ast, show_parse_summary
-from graph import load_ast, build_graph, save_graph, render_graph, show_graph_summary
+from graph import load_ast, build_graph, save_graph, render_graph, show_graph_summary, run_security_pipeline
+from security_graph import show_security_graph_summary, build_security_graph
+from rules import show_findings
 from help import show_help
+from llm_client import LocalLLMClient, load_config
+from taint_graph import render_taint_graph
+from entities import extract_entities
+
+def print_terminal_graphs(dependency_graph, security_graph):
+    # 1. Print Dependency Graph
+    print(f"\n  {CYAN}{BOLD}DEPENDENCY GRAPH (TERMINAL VIEW){RST}")
+    print(f"  {DIM}──────────────────────────────────────────────────{RST}")
+    
+    files = [n for n in dependency_graph["nodes"] if n["type"] == "file"]
+    functions = [n for n in dependency_graph["nodes"] if n["type"] == "function"]
+    
+    print(f"    {BOLD}Files ({len(files)}):{RST}")
+    for f in files[:10]:
+        print(f"      • {WHT}{f['label']}{RST} ({f['language']}, {f['layer']})")
+    if len(files) > 10:
+        print(f"      ... and {len(files) - 10} more files")
+        
+    print(f"\n    {BOLD}Functions ({len(functions)}):{RST}")
+    by_role = {}
+    for fn in functions:
+        by_role.setdefault(fn.get("security_role", "other"), []).append(fn)
+        
+    for role, fns in sorted(by_role.items()):
+        print(f"      {GRN}• {role.upper()} ({len(fns)}):{RST}")
+        for fn in fns[:5]:
+            print(f"        - {WHT}{fn['label']}{RST} [{fn['file']}:{fn['line']}]")
+        if len(fns) > 5:
+            print(f"        ... and {len(fns) - 5} more")
+            
+    print(f"\n    {BOLD}Connections:{RST}")
+    edges = dependency_graph.get("edges", [])
+    calls = [e for e in edges if e["type"] == "call"]
+    imports = [e for e in edges if e["type"] == "import"]
+    
+    print(f"      {GRN}• Imports ({len(imports)}):{RST}")
+    for imp in imports[:8]:
+        src_label = imp["source"].split(":")[-1]
+        tgt_label = imp["target"].split(":")[-1]
+        print(f"        - {src_label} {DIM}imports{RST} {tgt_label}")
+    if len(imports) > 8:
+        print(f"        ... and {len(imports) - 8} more")
+        
+    print(f"      {GRN}• Function Calls ({len(calls)}):{RST}")
+    for call in calls[:8]:
+        src_label = call["source"].split("::")[-1]
+        tgt_label = call["target"].split("::")[-1]
+        print(f"        - {src_label} {DIM}calls{RST} {tgt_label}")
+    if len(calls) > 8:
+        print(f"        ... and {len(calls) - 8} more")
+
+    # 2. Print Taint Flow Paths
+    print(f"\n  {CYAN}{BOLD}TAINT PROPAGATION PATHS (TERMINAL VIEW){RST}")
+    print(f"  {DIM}──────────────────────────────────────────────────{RST}")
+    
+    flows = security_graph.get("flows", [])
+    if not flows:
+        print(f"    {DIM}No taint propagation flows detected.{RST}")
+    else:
+        for idx, flow in enumerate(flows):
+            print(f"    {BOLD}Path #{idx+1}: {flow['source']} ──► {flow['sink_type']}{RST}")
+            labels = flow.get("path_labels", [])
+            path_str = f"      "
+            for step_idx, step in enumerate(labels):
+                if step_idx == 0:
+                    path_str += f"{RED}[SOURCE] {step}{RST}"
+                elif step_idx == len(labels) - 1:
+                    path_str += f" ──► {RED}[SINK] {step}{RST}"
+                else:
+                    path_str += f" ──► {YLW}{step}{RST}"
+            print(path_str)
+            
+            exprs = flow.get("expressions", [])
+            if exprs:
+                print(f"      {DIM}Transformations:{RST}")
+                for ex in exprs:
+                    print(f"        └─ {DIM}{ex}{RST}")
+            
+            san_status = f"{GRN}SANITIZED (via {', '.join(flow['validators'])}){RST}" if flow["validated"] else f"{RED}UNSANITIZED{RST}"
+            print(f"      {BOLD}Status:{RST} {san_status}\n")
+    print(f"  {DIM}──────────────────────────────────────────────────{RST}\n")
+
+def run_analysis_and_report(name, ast_data, verbose=False):
+    out_dir = os.path.join(WORKSPACE_DIR, name, "graph")
+    os.makedirs(out_dir, exist_ok=True)
+    
+    print(f"  {CYAN}[*]{RST} initializing local LLM client...")
+    llm_client = LocalLLMClient(part="classifier")
+    if llm_client.is_available():
+        if llm_client._detect_api() == "ollama" and not llm_client.is_model_available():
+            print(f"  {YLW}[!]{RST} Ollama server active, but model {WHT}'{llm_client.model}'{RST} is not pulled.")
+            print(f"      To pull it, run: {GRN}ollama pull {llm_client.model}{RST}")
+            print(f"      Running in pattern-only mode (reduced accuracy).")
+            llm_client = None
+        else:
+            print(f"  {GRN}[+]{RST} local LLM server active: {WHT}{llm_client.base_url}{RST} (model: {llm_client.model})")
+    else:
+        print(f"  {YLW}[!]{RST} no LLM available — classification is pattern-only (reduced accuracy)")
+        llm_client = None
+
+    print(f"  {CYAN}[*]{RST} running hybrid security analysis...")
+    pipeline = run_security_pipeline(ast_data, llm_client, verbose=verbose)
+    
+    spath = os.path.join(out_dir, "security_graph.json")
+    with open(spath, "w", encoding="utf-8") as f:
+        json.dump({
+            "entities": pipeline["entities"],
+            "security_graph": pipeline["security_graph"],
+            "findings": pipeline["findings"],
+        }, f, indent=2, ensure_ascii=False)
+    print(f"  {DIM}[*]{RST} security graph saved -> {WHT}{spath}{RST}")
+
+    # Show classification statistics
+    stats = getattr(extract_entities, "stats", {})
+    if stats:
+        pattern_count = stats.get("pattern_classified", 0)
+        llm_count = stats.get("llm_classified", 0)
+        unclassified_count = stats.get("unclassified", 0)
+        print(f"  {DIM}[*]{RST} classification: {GRN}{pattern_count}{RST} pattern-classified, {GRN}{llm_count}{RST} LLM-classified, {GRN}{unclassified_count}{RST} unclassified")
+
+    show_security_graph_summary(pipeline["security_graph"])
+    show_findings(pipeline["findings"])
+
+    if os.environ.get("ULTRON_VISUALISE") == "1":
+        dependency_graph = build_graph(ast_data)
+        print_terminal_graphs(dependency_graph, pipeline["security_graph"])
 
 def analyze_and_save(repo_url, repo_name):
     target = repo_path(repo_name)
@@ -25,6 +154,8 @@ def analyze_and_save(repo_url, repo_name):
     if ast_path:
         show_parse_summary(repo_name, ast_data)
         print(f"  {DIM}[*]{RST} AST saved -> {WHT}{ast_path}{RST}")
+        print()
+        run_analysis_and_report(repo_name, ast_data)
 
 def cmd_clone(url):
     repo_name = clone_repo(url)
@@ -53,10 +184,11 @@ def cmd_scan(name):
     if ast_path:
         show_parse_summary(name, ast_data)
         print(f"  {DIM}[*]{RST} AST saved -> {WHT}{ast_path}{RST}")
-    print()
-    print(f"  {DIM}[*]{RST} scanner not yet implemented — coming in Phase 2.")
+        print()
+        run_analysis_and_report(name, ast_data)
 
 def cmd_visualise(name):
+    os.environ["ULTRON_VISUALISE"] = "1"
     ast_data = load_ast(WORKSPACE_DIR, name)
     if not ast_data:
         print(f"  {YLW}[!]{RST} no AST data. run scan first.")
@@ -73,7 +205,18 @@ def cmd_visualise(name):
     out_path = os.path.join(out_dir, "dependency_graph.svg")
     vis_path = render_graph(graph, out_path)
     if vis_path:
-        print(f"  {GRN}[+]{RST} visualisation saved -> {WHT}{vis_path}{RST}")
+        print(f"  {GRN}[+]{RST} dependency visualisation saved -> {WHT}{vis_path}{RST}")
+
+    print()
+    run_analysis_and_report(name, ast_data)
+
+    # Render taint propagation graph
+    taint_paths = getattr(build_security_graph, "taint_paths", [])
+    if taint_paths:
+        taint_out_path = os.path.join(out_dir, "taint_graph.svg")
+        tvis_path = render_taint_graph(taint_paths, taint_out_path)
+        if tvis_path:
+            print(f"  {GRN}[+]{RST} taint propagation visualisation saved -> {WHT}{tvis_path}{RST}")
 
 def cmd_delete(args):
     if len(args) == 0:
@@ -84,11 +227,166 @@ def cmd_delete(args):
     else:
         delete_repo(args[0])
 
+def cmd_config(args):
+    config_path = "ultron_config.json"
+    config = load_config()
+    
+    if len(args) == 0:
+        # Show configuration
+        print(f"\n  {CYAN}{BOLD}ULTRON CONFIGURATION{RST}")
+        print(f"  {DIM}──────────────────────────────────────────────────{RST}")
+        print(f"    {BOLD}llm_url{RST}      : {WHT}{config.get('llm_url')}{RST}")
+        print(f"    {BOLD}llm_model{RST}    : {WHT}{config.get('llm_model')}{RST}")
+        print(f"    {BOLD}temperature{RST}  : {WHT}{config.get('temperature')}{RST}")
+        print(f"    {BOLD}max_tokens{RST}   : {WHT}{config.get('max_tokens')}{RST}")
+        print(f"    {BOLD}timeout{RST}      : {WHT}{config.get('timeout')}{RST}")
+        print(f"    {BOLD}num_workers{RST}  : {WHT}{config.get('num_workers')}{RST}")
+        print(f"    {BOLD}version{RST}      : {WHT}{config.get('version')}{RST}")
+        print(f"    {BOLD}verbose{RST}      : {WHT}{config.get('verbose', False)}{RST}")
+        print(f"    {BOLD}visualise{RST}    : {WHT}{config.get('visualise', False)}{RST}")
+        
+        # Display parts overrides
+        print(f"\n  {CYAN}{BOLD}SPECIFIC LLM PARTS OVERRIDES{RST}")
+        print(f"  {DIM}──────────────────────────────────────────────────{RST}")
+        overrides = config.setdefault("model_overrides", {
+            "classifier": "qwen2.5-coder:3b",
+            "detector": "qwen2.5-coder:3b",
+            "exploiter": "qwen2.5-coder:3b",
+            "reporter": "qwen2.5-coder:3b"
+        })
+        for part, model in overrides.items():
+            print(f"    {BOLD}{part:<12}{RST} : {WHT}{model}{RST}")
+            
+        print(f"\n  {DIM}To change a model override, run: {GRN}config <part> <model-name>{RST}")
+        print(f"  {DIM}To change a setting, run: {GRN}config <setting> <value>{RST} (e.g. config visualise true)")
+        print(f"  {DIM}To reset configuration to defaults, run: {GRN}config reset{RST}\n")
+        return
+
+    if len(args) == 1 and args[0].lower() == "reset":
+        default_config = {
+            "llm_url": "http://localhost:11434",
+            "llm_model": "qwen2.5-coder:3b",
+            "temperature": 0.1,
+            "max_tokens": 100,
+            "num_workers": 5,
+            "timeout": 15.0,
+            "version": "8.0.0",
+            "verbose": False,
+            "visualise": False,
+            "model_overrides": {
+                "classifier": "qwen2.5-coder:3b",
+                "detector": "qwen2.5-coder:3b",
+                "exploiter": "qwen2.5-coder:3b",
+                "reporter": "qwen2.5-coder:3b"
+            }
+        }
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(default_config, f, indent=2, ensure_ascii=False)
+            print(f"  {GRN}[+]{RST} configuration reset to defaults successfully.")
+            print(f"  {DIM}[*]{RST} saved configuration to {WHT}{config_path}{RST}")
+        except Exception as e:
+            print(f"  {RED}[-]{RST} failed to reset configuration: {e}")
+        return
+
+    if len(args) < 2:
+        print(f"  {RED}[-]{RST} usage: config <part/setting> <value> (e.g. config classifier llama3.1:8b or config visualise true)")
+        return
+
+    part = args[0].lower()
+    val_str = args[1]
+    
+    valid_parts = {"classifier", "detector", "exploiter", "reporter", "default"}
+    valid_settings = {"visualise", "visualize", "verbose", "temperature", "max_tokens", "timeout", "num_workers", "llm_url"}
+    
+    if part not in valid_parts and part not in valid_settings:
+        print(f"  {RED}[-]{RST} invalid part or setting '{part}'. Valid parts: {', '.join(valid_parts)}, Settings: {', '.join(valid_settings)}")
+        return
+
+    if part in valid_settings:
+        if part in ("visualise", "visualize"):
+            val = val_str.lower() in ("true", "1", "yes", "on", "enable", "enabled")
+            config["visualise"] = val
+            config["visualize"] = val
+            print(f"  {GRN}[+]{RST} setting {BOLD}visualise{RST} updated to {WHT}{val}{RST}")
+        elif part == "verbose":
+            val = val_str.lower() in ("true", "1", "yes", "on", "enable", "enabled")
+            config["verbose"] = val
+            print(f"  {GRN}[+]{RST} setting {BOLD}verbose{RST} updated to {WHT}{val}{RST}")
+        elif part in ("temperature", "timeout"):
+            try:
+                val = float(val_str)
+                config[part] = val
+                print(f"  {GRN}[+]{RST} setting {BOLD}{part}{RST} updated to {WHT}{val}{RST}")
+            except ValueError:
+                print(f"  {RED}[-]{RST} invalid float value for {part}: {val_str}")
+                return
+        elif part in ("max_tokens", "num_workers"):
+            try:
+                val = int(val_str)
+                config[part] = val
+                print(f"  {GRN}[+]{RST} setting {BOLD}{part}{RST} updated to {WHT}{val}{RST}")
+            except ValueError:
+                print(f"  {RED}[-]{RST} invalid integer value for {part}: {val_str}")
+                return
+        elif part == "llm_url":
+            config[part] = val_str
+            print(f"  {GRN}[+]{RST} setting {BOLD}{part}{RST} updated to {WHT}{val_str}{RST}")
+    else:
+        if part == "default":
+            config["llm_model"] = val_str
+            print(f"  {GRN}[+]{RST} default model updated to {WHT}'{val_str}'{RST}")
+        else:
+            overrides = config.setdefault("model_overrides", {})
+            overrides[part] = val_str
+            print(f"  {GRN}[+]{RST} model override for {BOLD}{part}{RST} updated to {WHT}'{val_str}'{RST}")
+
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        print(f"  {DIM}[*]{RST} saved configuration to {WHT}{config_path}{RST}")
+    except Exception as e:
+        print(f"  {RED}[-]{RST} failed to save configuration: {e}")
+
 def interactive():
     while True:
         line = input(f"  {CYAN}[~]{RST} target repository : ").strip()
+        if not line:
+            continue
         parts = line.split()
         cmd = parts[0].lower() if parts else ""
+
+        # Check for debug flags in interactive line
+        debug_flags = {"--debug", "-d", "--verbose", "-v"}
+        cmd_debug = any(p in debug_flags for p in parts)
+        
+        if cmd_debug or os.environ.get("ULTRON_GLOBAL_DEBUG") == "1":
+            os.environ["ULTRON_DEBUG"] = "1"
+            if cmd_debug:
+                print(f"  {CYAN}[*]{RST} Debug/Verbose mode enabled for this command")
+            parts = [p for p in parts if p not in debug_flags]
+            # Reconstruct clean line without debug flags
+            line = " ".join(parts)
+            cmd = parts[0].lower() if parts else ""
+        else:
+            if "ULTRON_DEBUG" in os.environ:
+                del os.environ["ULTRON_DEBUG"]
+
+        # Check for visualise flags in interactive line
+        vis_flags = {"--visualise", "--visualize", "-vis"}
+        cmd_vis = any(p in vis_flags for p in parts)
+        
+        if cmd_vis or os.environ.get("ULTRON_GLOBAL_VISUALISE") == "1":
+            os.environ["ULTRON_VISUALISE"] = "1"
+            if cmd_vis:
+                print(f"  {CYAN}[*]{RST} Visualisation mode enabled for this command")
+            parts = [p for p in parts if p not in vis_flags]
+            # Reconstruct clean line without visualise flags
+            line = " ".join(parts)
+            cmd = parts[0].lower() if parts else ""
+        else:
+            if "ULTRON_VISUALISE" in os.environ:
+                del os.environ["ULTRON_VISUALISE"]
 
         if cmd in ("help", "--help", "-h"):
             show_help()
@@ -100,6 +398,10 @@ def interactive():
 
         if cmd == "list":
             list_repos()
+            continue
+
+        if cmd == "config":
+            cmd_config(parts[1:])
             continue
 
         if cmd == "scan":
@@ -130,6 +432,30 @@ def interactive():
         print()
 
 def main():
+    # Load flags from config
+    config = load_config()
+    if config.get("verbose", False) or config.get("debug", False):
+        os.environ["ULTRON_GLOBAL_DEBUG"] = "1"
+        os.environ["ULTRON_DEBUG"] = "1"
+        
+    if config.get("visualise", False) or config.get("visualize", False):
+        os.environ["ULTRON_GLOBAL_VISUALISE"] = "1"
+        os.environ["ULTRON_VISUALISE"] = "1"
+
+    # Check for debug flags in CLI args
+    debug_flags = {"--debug", "-d", "--verbose", "-v"}
+    if any(arg in sys.argv for arg in debug_flags):
+        os.environ["ULTRON_GLOBAL_DEBUG"] = "1"
+        os.environ["ULTRON_DEBUG"] = "1"
+        sys.argv = [arg for arg in sys.argv if arg not in debug_flags]
+
+    # Check for visualise flags in CLI args
+    vis_flags = {"--visualise", "--visualize", "-vis"}
+    if any(arg in sys.argv for arg in vis_flags):
+        os.environ["ULTRON_GLOBAL_VISUALISE"] = "1"
+        os.environ["ULTRON_VISUALISE"] = "1"
+        sys.argv = [arg for arg in sys.argv if arg not in vis_flags]
+
     banner()
 
     if len(sys.argv) > 1:
@@ -141,6 +467,8 @@ def main():
 
         if arg == "list":
             list_repos()
+        elif arg == "config":
+            cmd_config(sys.argv[2:])
         elif arg == "scan":
             if len(sys.argv) < 3:
                 print(f"  {RED}[-]{RST} usage: ultron scan <repo-name>")
@@ -158,6 +486,8 @@ def main():
                 cmd_visualise(sys.argv[2])
         else:
             cmd_clone(arg)
+
+        sys.exit(0)
 
     interactive()
 
