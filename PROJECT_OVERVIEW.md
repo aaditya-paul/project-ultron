@@ -55,7 +55,7 @@ This is the core semantic analysis. A set of extractors and engines transforms r
   3. **Qualified name** as `module.function`
 - Populates `call_resolutions` on each module with confidence scores.
 
-#### 3c. Call Graph (`extractors/call_graph.py`)
+#### 3c. Call Graph {`extractors/call_graph.py`}
 
 - Builds a **directed caller→callee graph** from resolved call sites.
 - Provides: adjacency list, reverse adjacency, path finding with DFS, cycle protection, function index lookup.
