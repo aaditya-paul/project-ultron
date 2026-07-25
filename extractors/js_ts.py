@@ -516,7 +516,7 @@ class JsTsExtractor:
                         transform="assign",
                         conditions=conditions or None,
                     )
-                # Edge from assignment statement to the target variable(s)
+                # Edge from assignment statement to the target variable(s) or property access
                 destructured_vars = self._parse_destructured_vars(stmt.target)
                 if destructured_vars:
                     for var_name in destructured_vars:
@@ -528,13 +528,32 @@ class JsTsExtractor:
                             conditions=conditions or None,
                         )
                 else:
-                    target_var_id = IRVar(stmt.target).id
-                    mod.add_edge(
-                        source_id=stmt.id,
-                        target_id=target_var_id,
-                        transform="assign_target",
-                        conditions=conditions or None,
-                    )
+                    if "." in stmt.target:
+                        parts = stmt.target.split(".")
+                        root_name = parts[0]
+                        prop_path = parts[1:]
+                        access_id = IRAccess(root=IRVar(root_name), path=prop_path).id
+                        root_id = IRVar(root_name).id
+                        mod.add_edge(
+                            source_id=stmt.id,
+                            target_id=access_id,
+                            transform="assign_target",
+                            conditions=conditions or None,
+                        )
+                        mod.add_edge(
+                            source_id=stmt.id,
+                            target_id=root_id,
+                            transform="assign_target_root",
+                            conditions=conditions or None,
+                        )
+                    else:
+                        target_var_id = IRVar(stmt.target).id
+                        mod.add_edge(
+                            source_id=stmt.id,
+                            target_id=target_var_id,
+                            transform="assign_target",
+                            conditions=conditions or None,
+                        )
                 # Also track variable-to-variable edges for later resolution
                 self._build_expr_provenance(stmt.value, mod, conditions)
 

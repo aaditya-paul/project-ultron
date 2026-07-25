@@ -16,6 +16,7 @@ from taint_graph import render_taint_graph
 from rules import run_rules
 from llm_client import load_config, create_llm_client, CLOUD_PROVIDER_NAMES
 from llm_detector import run_llm_detection, run_llm_auth_validation
+from pdf_report import generate_pdf_report
 from extractors.js_ts import JsTsExtractor
 from extractors.resolver import SymbolResolver
 from extractors.call_graph import CallGraph
@@ -275,6 +276,11 @@ def run_full_analysis(repo_name):
 
     sec_svg = os.path.join(out_dir, "security_graph.svg")
     render_security_graph(security_graph, sec_svg)
+
+    pdf_path = None
+    if config.get("generate_pdf", True):
+        pdf_out = os.path.join(out_dir, "security_report.pdf")
+        pdf_path = generate_pdf_report(repo_name, security_graph, findings, pdf_out)
 
     spath = os.path.join(out_dir, "security_graph.json")
     with open(spath, "w", encoding="utf-8") as f:

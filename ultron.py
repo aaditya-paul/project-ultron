@@ -14,6 +14,7 @@ from help import show_help
 from llm_client import LocalLLMClient, CloudLLMClient, load_config, create_llm_client, CLOUD_PROVIDER_NAMES
 from taint_graph import render_taint_graph
 from llm_detector import run_llm_detection, run_llm_auth_validation
+from pdf_report import generate_pdf_report
 from extractors.js_ts import JsTsExtractor
 from extractors.resolver import SymbolResolver
 from extractors.call_graph import CallGraph
@@ -193,6 +194,13 @@ def run_ir_analysis(repo_name, target, ir_modules, call_graph, taint_paths):
     sec_vis = render_security_graph(security_graph, sec_out)
     if sec_vis:
         print(f"  {GRN}[+]{RST} security graph visualisation saved -> {WHT}{sec_vis}{RST}")
+
+    # Generate PDF Security Report
+    if config.get("generate_pdf", True):
+        pdf_out = os.path.join(out_dir, "security_report.pdf")
+        pdf_path = generate_pdf_report(repo_name, security_graph, findings, pdf_out)
+        if pdf_path:
+            print(f"  {GRN}[+]{RST} PDF security report saved -> {WHT}{pdf_path}{RST}")
 
     # If visualise flag is on, open SVGs in browser
     if config.get("visualise", False) or os.environ.get("ULTRON_VISUALISE") == "1":

@@ -18,9 +18,18 @@ from extractors.call_graph import CallGraph
 # ── Sink patterns (mirrors classifier.py) ────────────────────────────────────
 
 SINK_DB_PATTERNS = {
-    "*db.*", "*query*", "*insert*", "*update*", "*delete*", "*upsert*", "*execute*",
-    "*prisma*", "*knex*", "*mongoose*", "*sequelize*", "*find*", "*save*", "*select*",
-    "*create*", "*$transaction*",
+    "*db.*", "*query*", "*prisma*", "*knex*", "*mongoose*", "*sequelize*",
+    "*repository*", "*model*", "*orm*", "*$transaction*", "*$execute*",
+    "*.findunique*", "*.findmany*", "*.findfirst*", "*.findone*",
+    "*.create*", "*.createmany*", "*.update*", "*.updatemany*",
+    "*.delete*", "*.deletemany*", "*.upsert*", "*.raw*", "*.executesql*",
+    "*.insert*", "*.save*", "*.select*",
+}
+
+JS_STD_EXCLUSIONS = {
+    "find", "filter", "map", "foreach", "reduce", "some", "every",
+    "includes", "indexof", "create", "assign", "keys", "values",
+    "parse", "stringify", "slice", "splice", "push", "pop", "shift", "unshift"
 }
 
 SINK_SHELL_PATTERNS = {
@@ -59,6 +68,13 @@ def matches_any_glob(text: str, patterns: set) -> bool:
 
 def detect_sink_type(call_target: str) -> Optional[tuple[str, float]]:
     """Check if a call target matches any known sink pattern."""
+    target_lower = call_target.lower().strip()
+    parts = target_lower.split(".")
+
+    # Guard against standard JS object/array helper methods (e.g. Object.create, arr.find)
+    if parts[-1] in JS_STD_EXCLUSIONS and parts[0] not in ("db", "prisma", "knex", "repo", "repository", "model", "orm"):
+        return None
+
     if matches_any_glob(call_target, SINK_SHELL_PATTERNS):
         return ("SINK_SHELL", 0.90)
     if matches_any_glob(call_target, SINK_DB_PATTERNS):
