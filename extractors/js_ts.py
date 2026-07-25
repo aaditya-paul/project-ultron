@@ -235,6 +235,8 @@ class JsTsExtractor:
             alt_node = node.child_by_field_name("alternative")
 
             condition = self._extract_expr(cond_node, source_bytes, file_path) if cond_node else IRLiteral(True, "boolean")
+            if condition is None:
+                condition = IRLiteral(True, "boolean")
 
             true_body = self._extract_block(cons_node, source_bytes, file_path) if cons_node else []
             false_body = self._extract_block(alt_node, source_bytes, file_path) if alt_node else []
@@ -355,12 +357,11 @@ class JsTsExtractor:
             return IRLiteral(None, "null")
 
         elif t == "unary_expression":
-            # For negation, emit a special call expression
             op = self._node_text(node.child_by_field_name("operator"), source_bytes)
             arg = self._extract_expr(node.child_by_field_name("argument"), source_bytes, file_path)
             if arg:
                 return IRCallExpr(target=f"unary_{op}", args=[arg])
-            return arg
+            return None
 
         elif t == "binary_expression":
             op = self._node_text(node.child_by_field_name("operator"), source_bytes)

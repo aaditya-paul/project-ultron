@@ -247,14 +247,14 @@ class IRBranch(IRStmt):
 
     def __post_init__(self):
         if not self.id:
-            c_text = self.condition.to_dict().get("target", str(self.condition))
+            c_text = self.condition.to_dict().get("target", str(self.condition)) if self.condition is not None else "none"
             self.id = _node_id("", "", _ID_PREFIX["IRBranch"], c_text)
 
     def to_dict(self) -> dict:
         return {
             "type": self.type,
             "id": self.id,
-            "condition": self.condition.to_dict(),
+            "condition": self.condition.to_dict() if self.condition is not None else None,
             "true_body": [s.to_dict() for s in self.true_body],
             "false_body": [s.to_dict() for s in self.false_body],
             "line": self.line,
@@ -263,7 +263,7 @@ class IRBranch(IRStmt):
     @classmethod
     def from_dict(cls, data: dict) -> "IRBranch":
         return cls(
-            condition=IRExpr.from_dict(data["condition"]),
+            condition=IRExpr.from_dict(data["condition"]) if data.get("condition") else None,
             true_body=[IRStmt.from_dict(s) for s in data["true_body"]],
             false_body=[IRStmt.from_dict(s) for s in data["false_body"]],
             line=data.get("line", 0),
