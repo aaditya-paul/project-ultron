@@ -193,7 +193,7 @@ The program **never exits on errors** — clone failures, invalid commands, miss
 [5. Rules + LLM Detector]  ── Taint-guided deterministic rules    ✅ done
      │                          + optional LLM verification
      ▼
-[6. Report + SVGs]         ── Findings + dependency/taint graphs  ✅ done
+[6. Report + SVGs]         ── Findings + dependency/taint/security graphs  ✅ done
 ```
 
 ### Security Pipeline Details
@@ -222,6 +222,7 @@ The pipeline transforms raw AST data into a security-focused representation:
   - Extracts relevant code sections near source/sink variables (reduces token usage 80–95%) along with the taint flow trace.
   - Pre-filters trivially safe flows (logging sinks, env-var sources, single-step paths) before any LLM call.
   - Feeds optimized context to a specialized LLM (`detector` model) which performs deep, context-aware analysis to verify whether a genuine, exploitable vulnerability exists, filtering out false positives.
+  - **JSON retry**: if the LLM returns malformed/unparseable JSON, retries up to 2× with a stricter prompt demanding valid JSON only.
   - Results are cached in memory for duplicate flows within the same run.
   - If the detector model is offline or unavailable, falls back to deterministic checks.
 
