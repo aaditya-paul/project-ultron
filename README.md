@@ -285,6 +285,7 @@ ultron/
 - **Response caching:** Identical prompts (same model, params, input) hit disk cache `.ultron_cache/llm_cache.json` instead of the API. Survives across runs.
 - **Prompt optimization:** Only relevant source code near source/sink variables is included (context window ±15 lines), drastically reducing token usage without sacrificing accuracy.
 - **Pre-filtering:** Trivially safe flows (logging sinks, env-var sources, single-step paths) skip the LLM entirely.
+- **JSON retry:** If the LLM returns unparseable/malformed JSON, the detector retries up to 2× with a stricter prompt reinforcing valid-JSON-only output.
 - **In-memory dedup:** Duplicate flows within the same session use cached results.
 
 ---
@@ -329,7 +330,7 @@ ultron/
   - Role-colored Graphviz DOT/SVG export
   - Orchestrates full security pipeline
 - `visualise` / `visualize` command runs full pipeline
-- Auto-generated SVGs (dependency_graph.svg, taint_graph.svg) on every scan
+- Auto-generated SVGs (dependency_graph.svg, taint_graph.svg, security_graph.svg) on every scan
 - List cloned repositories
 - Delete individual or all repositories (cleans clone + workspace)
 - Interactive CLI with retry on failure — **never exits on errors**

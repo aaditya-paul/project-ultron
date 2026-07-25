@@ -372,7 +372,10 @@ def cmd_config(args):
             },
             "api_keys": {"groq": "", "gemini": "", "nvidia": ""},
             "cloud_chain": {"default": ["groq", "gemini", "nvidia"]},
-            "cloud_models": {"groq": "llama-3.3-70b-versatile", "gemini": "gemini-2.0-flash", "nvidia": "meta/llama-3.1-8b-instruct"}
+            "cloud_models": {"groq": "llama-3.3-70b-versatile", "gemini": "gemini-2.0-flash", "nvidia": "meta/llama-3.1-8b-instruct"},
+            "rate_limits": {},
+            "enable_cache": True,
+            "cache_only": False
         }
         try:
             with open(config_path, "w", encoding="utf-8") as f:
