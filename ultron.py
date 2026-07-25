@@ -16,6 +16,53 @@ from taint_graph import render_taint_graph
 from entities import extract_entities
 from llm_detector import run_llm_detection
 
+try:
+    from extractors.js_ts import JsTsExtractor
+    from extractors.adapter import inject_ir_into_ast
+    _HAS_IR = True
+except ImportError:
+    _HAS_IR = False
+
+def _run_ir_pipeline(target: str, ast_data: dict) -> dict:
+    """Run IR extractor on JS/TS files and inject into ast_data."""
+    if not _HAS_IR:
+        print(f"  {YLW}[!]{RST} IR extractor not available (tree-sitter missing?)")
+        return ast_data
+
+    extractor = JsTsExtractor()
+    ir_modules = []
+    total_ir_funcs = 0
+
+    for fpath, info in ast_data.get("files", {}).items():
+        lang = info.get("language", "")
+        if lang not in ("TypeScript", "JavaScript", "TSX"):
+            continue
+        full_path = os.path.join(target, fpath)
+        if not os.path.isfile(full_path):
+            continue
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                source = f.read()
+        except Exception:
+            continue
+        mod = extractor.extract(source, fpath, lang)
+        if mod:
+            ir_modules.append(mod)
+            total_ir_funcs += len(mod.functions)
+
+    if ir_modules:
+        legacy_count = sum(
+            1 for info in ast_data.get("files", {}).values()
+            for fn in info.get("functions", [])
+        )
+        inject_ir_into_ast(ir_modules, ast_data)
+        print(f"  {GRN}[+]{RST} IR pipeline: {WHT}{len(ir_modules)}{RST} files, {WHT}{total_ir_funcs}{RST} functions (legacy: {legacy_count})")
+    else:
+        print(f"  {DIM}[*]{RST} IR pipeline: no JS/TS files to process")
+
+    return ast_data
+
+
 def print_terminal_graphs(dependency_graph, security_graph):
     # 1. Print Dependency Graph
     print(f"\n  {CYAN}{BOLD}DEPENDENCY GRAPH (TERMINAL VIEW){RST}")
@@ -198,6 +245,8 @@ def analyze_and_save(repo_url, repo_name):
 
     print(f"  {CYAN}[*]{RST} parsing AST...")
     ast_data = parse_repo(target)
+    if os.environ.get("ULTRON_IR") == "1":
+        ast_data = _run_ir_pipeline(target, ast_data)
     ast_path = save_ast(WORKSPACE_DIR, repo_name, ast_data)
     if ast_path:
         show_parse_summary(repo_name, ast_data)
@@ -228,6 +277,8 @@ def cmd_scan(name):
 
     print(f"  {CYAN}[*]{RST} parsing AST...")
     ast_data = parse_repo(target)
+    if os.environ.get("ULTRON_IR") == "1":
+        ast_data = _run_ir_pipeline(target, ast_data)
     ast_path = save_ast(WORKSPACE_DIR, name, ast_data)
     if ast_path:
         show_parse_summary(name, ast_data)
@@ -477,6 +528,18 @@ def interactive():
             line = " ".join(parts)
             cmd = parts[0].lower() if parts else ""
 
+        # Check for --ir flag in interactive line
+        ir_flags = {"--ir"}
+        if any(p in ir_flags for p in parts):
+            os.environ["ULTRON_IR"] = "1"
+            print(f"  {CYAN}[*]{RST} IR pipeline enabled for this command")
+            parts = [p for p in parts if p not in ir_flags]
+            line = " ".join(parts)
+            cmd = parts[0].lower() if parts else ""
+        else:
+            if "ULTRON_IR" in os.environ:
+                del os.environ["ULTRON_IR"]
+
         if cmd in ("help", "--help", "-h"):
             show_help()
             continue
@@ -557,6 +620,13 @@ def main():
                 break
     if mode_idx is not None:
         sys.argv = sys.argv[:mode_idx] + sys.argv[mode_idx + 2:]
+
+    # Check for --ir flag in CLI args
+    ir_flag = {"--ir"}
+    use_ir = any(arg in ir_flag for arg in sys.argv)
+    if use_ir:
+        os.environ["ULTRON_IR"] = "1"
+        sys.argv = [arg for arg in sys.argv if arg not in ir_flag]
 
     banner()
 

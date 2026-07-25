@@ -77,7 +77,7 @@ class LocalLLMClient:
         self.temperature = config["temperature"]
         self.max_tokens = config["max_tokens"]
         self.num_workers = config["num_workers"]
-        self.timeout = config["timeout"]
+        self.timeout = None  # local LLMs are unpredictable — wait as long as needed
         self.detected_api_type = None
 
     def _detect_api(self) -> str:

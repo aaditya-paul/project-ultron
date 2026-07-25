@@ -1,6 +1,7 @@
 import fnmatch
 import re
 import os
+import json
 from dataclasses import asdict
 from typing import Optional, List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -207,6 +208,27 @@ def parse_response(response_text: str) -> Tuple[str, float]:
         
     return detected_label, confidence
 
+ROLE_DESCRIPTIONS = """- SOURCE: receives attacker-controlled input (HTTP req/res, event payloads, user-supplied data)
+- SINK_DATABASE: writes to or queries a database (query, execute, find, save, insert, update, delete, ORM)
+- SINK_SHELL: executes system/shell commands (exec, spawn, system, popen, child_process)
+- SINK_FILE: reads/writes/deletes files on the filesystem
+- SINK_NETWORK: makes outbound network requests (fetch, axios, http.request, got)
+- AUTH: authentication, authorization, token checks, login, JWT, access control
+- VALIDATION: validates, sanitizes, escapes, or parses inputs (zod, joi, yup, assert)
+- ROUTE: HTTP endpoint handler (GET/POST route handlers, API controllers)
+- NONE: not security-relevant (utility, helper, logger, UI component)"""
+
+BATCH_PROMPT_TEMPLATE = """You are a security code analyzer. Classify each function below into exactly one security role.
+
+Available roles:
+{role_descriptions}
+
+Return ONLY a valid JSON array. No markdown, no explanation, no extra text.
+Format: [{{"name": "...", "classification": "...", "confidence": 0.0-1.0}}]
+
+Functions:
+{functions_json}"""
+
 class LLMPass:
     PROMPT_TEMPLATE = """<|think|> You are a security code analyzer. Given a function's features, classify its security role.
 
@@ -221,15 +243,7 @@ IMPORTS IN FILE: {file_imports}
 CALLED BY: {calls_to_this}
 
 Classify this function as exactly ONE of these security roles:
-- SOURCE: receives attacker-controlled input. This includes any function accepting HTTP requests, req/res objects, event payloads, webhook inputs, or parameters representing user-supplied data.
-- SINK_DATABASE: writes to, queries, or interacts with a database (SQL, NoSQL, ORMs). E.g., calls to query(), execute(), find(), save(), insert(), update(), delete(), or ORM methods.
-- SINK_SHELL: executes system or shell commands. E.g., spawn(), exec(), system(), popen(), child_process.
-- SINK_FILE: reads, writes, deletes, or manipulates files on the local filesystem.
-- SINK_NETWORK: makes outbound network requests (fetch, axios, http/https requests, request, got).
-- AUTH: performs authentication, authorization, token checks, logins, sign-ins, JWT signing/verification, permission validation, or access control checks.
-- VALIDATION: validates, sanitizes, escapes, checks, or parses inputs to ensure safety (e.g. zod parse, joi, yup, escape, sanitize, assert).
-- ROUTE: is an HTTP endpoint handler (e.g. GET/POST route handlers, API controllers, router methods).
-- NONE: not security-relevant. Use this if the function is a pure utility, helper, logger, UI component, or has no security significance.
+{role_descriptions}
 
 Provide your reasoning, then output the final classification and confidence score enclosed in XML tags.
 Format:
@@ -251,7 +265,8 @@ Example:
             body_text=features.body_text,
             calls_made=features.calls_made,
             file_imports=features.file_imports,
-            calls_to_this=features.calls_to_this
+            calls_to_this=features.calls_to_this,
+            role_descriptions=ROLE_DESCRIPTIONS
         )
         if os.environ.get("ULTRON_DEBUG") == "1":
             print(f"\n{CYAN}==================== [DEBUG LLM INPUT: {features.name}] ===================={RST}")
@@ -263,41 +278,113 @@ Example:
         label, confidence = parse_response(response)
         return Classification(label, confidence, by="llm")
 
+    def _format_single_features(self, feat: FunctionFeatures) -> dict:
+        return {
+            "name": feat.name or "<anonymous>",
+            "file": feat.file_path,
+            "params": feat.params,
+            "calls": feat.calls_made[:15],
+            "imports": feat.file_imports[:8],
+            "body": (feat.body_text or "")[:500]
+        }
+
+    def _parse_batch_response(self, raw: str, total: int) -> List[Optional[Classification]]:
+        try:
+            cleaned = raw.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned[7:]
+            if cleaned.startswith("```"):
+                cleaned = cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+            data = json.loads(cleaned)
+            if len(data) != total:
+                return []
+            results = []
+            for entry in data:
+                label = entry.get("classification", "NONE")
+                conf = float(entry.get("confidence", 0.8))
+                results.append(Classification(label, min(conf, 1.0), by="llm"))
+            return results
+        except Exception:
+            return []
+
     def classify_batch(self, features_list: List[FunctionFeatures]) -> List[Classification]:
-        prompts = [
-            self.PROMPT_TEMPLATE.format(
-                name=feat.name,
-                file_path=feat.file_path,
-                params=feat.params,
-                body_text=feat.body_text,
-                calls_made=feat.calls_made,
-                file_imports=feat.file_imports,
-                calls_to_this=feat.calls_to_this
-            )
-            for feat in features_list
-        ]
         total = len(features_list)
         verbose = os.environ.get("ULTRON_DEBUG") == "1"
 
-        results = [None] * total
-        completed = 0
+        if total == 0:
+            return []
 
-        with ThreadPoolExecutor(max_workers=self.llm_client.num_workers) as executor:
-            future_map = {
-                executor.submit(self.llm_client.complete, prompts[i], 1024): i
-                for i in range(total)
-            }
-            for future in as_completed(future_map):
-                idx = future_map[future]
-                resp = future.result()
-                label, confidence = parse_response(resp)
-                results[idx] = Classification(label, confidence, by="llm")
-                completed += 1
+        results: List[Optional[Classification]] = [None] * total
+
+        if total > 5:
+            BATCH_SIZE = 10
+            batches = [features_list[i:i + BATCH_SIZE] for i in range(0, total, BATCH_SIZE)]
+
+            for batch in batches:
+                batch_total = len(batch)
+                funcs_json = json.dumps([
+                    self._format_single_features(f) for f in batch
+                ], indent=2)
+                prompt = BATCH_PROMPT_TEMPLATE.format(
+                    role_descriptions=ROLE_DESCRIPTIONS,
+                    functions_json=funcs_json
+                )
+
                 if verbose:
-                    name = features_list[idx].name or "<anonymous>"
-                    print(f"  {GRN}[+]{RST} classified {WHT}{name}{RST} ({completed}/{total})")
+                    print(f"\n{CYAN}==================== [BATCH LLM: {batch_total} functions] ===================={RST}")
+
+                response = self.llm_client.complete(prompt, max_tokens=4096)
+
+                if verbose:
+                    print(f"{CYAN}====================================================================={RST}\n")
+
+                batch_results = self._parse_batch_response(response, batch_total)
+                if len(batch_results) == batch_total:
+                    for feat, res in zip(batch, batch_results):
+                        idx = features_list.index(feat)
+                        results[idx] = res
+                    if verbose:
+                        for i, (feat, res) in enumerate(zip(batch, batch_results)):
+                            name = feat.name or "<anonymous>"
+                            print(f"  {GRN}[+]{RST} classified {WHT}{name}{RST} -> {res.label} ({i+1}/{batch_total})")
+                else:
+                    if verbose:
+                        print(f"  {YLW}[!]{RST} batch JSON parse failed, falling back to individual calls")
+                    for feat in batch:
+                        idx = features_list.index(feat)
+                        results[idx] = self._classify_single(feat, verbose)
+
+            return results
+
+        for feat in features_list:
+            idx = features_list.index(feat)
+            results[idx] = self._classify_single(feat, verbose)
 
         return results
+
+    def _classify_single(self, feat: FunctionFeatures, verbose: bool) -> Classification:
+        prompt = self.PROMPT_TEMPLATE.format(
+            name=feat.name or "<anonymous>",
+            file_path=feat.file_path,
+            params=feat.params,
+            body_text=feat.body_text,
+            calls_made=feat.calls_made,
+            file_imports=feat.file_imports,
+            calls_to_this=feat.calls_to_this,
+            role_descriptions=ROLE_DESCRIPTIONS
+        )
+        if verbose:
+            print(f"\n{CYAN}==================== [DEBUG LLM INPUT: {feat.name}] ===================={RST}")
+            print(prompt)
+            print(f"{CYAN}========================================================================{RST}")
+        response = self.llm_client.complete(prompt, max_tokens=1024, stream=True)
+        if verbose:
+            print(f"{GRN}========================================================================{RST}\n")
+        label, confidence = parse_response(response)
+        return Classification(label, confidence, by="llm")
 
 class HybridClassifier:
     def __init__(self, llm_client=None):
