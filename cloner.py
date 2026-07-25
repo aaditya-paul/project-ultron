@@ -5,6 +5,7 @@ import subprocess
 from colors import DIM, WHT, CYAN, GRN, RED, BOLD, RST
 
 CLONES_DIR = os.path.join(os.getcwd(), "clones")
+WORKSPACE_DIR = os.path.join(os.getcwd(), "workspace")
 
 def extract_repo_name(repo_url):
     name = repo_url.rstrip("/").split("/")[-1]
@@ -17,6 +18,31 @@ def repo_path(repo_name):
 
 def repo_exists(repo_name):
     return os.path.isdir(repo_path(repo_name))
+
+def get_remote_url(repo_name):
+    target = repo_path(repo_name)
+    git_dir = os.path.join(target, ".git")
+    if not os.path.isdir(git_dir):
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", target, "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+def workspace_path(repo_name):
+    return os.path.join(WORKSPACE_DIR, repo_name)
+
+def delete_workspace(repo_name):
+    ws = workspace_path(repo_name)
+    if os.path.isdir(ws):
+        shutil.rmtree(ws)
+        print(f"  {GRN}[+]{RST} {WHT}{repo_name}{RST} workspace deleted.")
 
 def pull_repo(target_dir):
     print(f"  {CYAN}[*]{RST} pulling latest changes...")
@@ -93,6 +119,7 @@ def delete_repo(repo_name):
 
     shutil.rmtree(target)
     print(f"  {GRN}[+]{RST} {WHT}{repo_name}{RST} deleted.")
+    delete_workspace(repo_name)
     return True
 
 def delete_all_repos():
@@ -116,3 +143,4 @@ def delete_all_repos():
     for r in repos:
         shutil.rmtree(repo_path(r))
         print(f"  {GRN}[+]{RST} {WHT}{r}{RST} deleted.")
+        delete_workspace(r)

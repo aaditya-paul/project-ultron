@@ -2,7 +2,7 @@ import sys
 
 from colors import CYAN, RED, GRN, WHT, DIM, RST
 from banner import banner
-from cloner import clone_repo, list_repos, delete_repo, delete_all_repos, repo_exists, repo_path, extract_repo_name
+from cloner import clone_repo, list_repos, delete_repo, delete_all_repos, repo_exists, repo_path, extract_repo_name, get_remote_url
 from detector import analyze_project, show_detected_types, save_workspace_manifest
 from help import show_help
 
@@ -29,11 +29,12 @@ def cmd_scan(name):
         print(f"  {RED}[-]{RST} {WHT}{name}{RST} not found in clones/. clone it first.")
         return
     target = repo_path(name)
+    remote_url = get_remote_url(name) or f"clones/{name}"
     print(f"  {DIM}[*]{RST} switched to {WHT}{target}{RST}")
     print()
     analysis = analyze_project(target)
     show_detected_types(name, analysis)
-    manifest = save_workspace_manifest(name, f"clones/{name}", analysis)
+    manifest = save_workspace_manifest(name, remote_url, analysis)
     print(f"  {DIM}[*]{RST} workspace saved -> {WHT}{manifest}{RST}")
     print()
     print(f"  {DIM}[*]{RST} scanner not yet implemented — coming in Phase 2.")
