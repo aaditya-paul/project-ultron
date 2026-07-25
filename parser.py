@@ -185,12 +185,10 @@ def _node_text(node, source_bytes):
 def _extract_name(node, source_bytes):
     for child in node.named_children:
         if child.type == "identifier":
-            return _node_text(child, source_bytes)
+            return _node_text(child, source_bytes), False
         if child.type in ("property_identifier", "field_identifier"):
-            return _node_text(child, source_bytes)
-    text = _node_text(node, source_bytes)[:60]
-    parts = text.split("(")[0].split()
-    return parts[-1] if parts else text[:30]
+            return _node_text(child, source_bytes), False
+    return None, True
 
 def _extract_params(node, source_bytes):
     for child in node.named_children:
@@ -259,17 +257,18 @@ def parse_file(filepath, lang_name):
     }
 
     for node in _find_children(root, func_set):
-        name = _extract_name(node, source)
+        name, is_anon = _extract_name(node, source)
         params = _extract_params(node, source)
         result["functions"].append({
-            "name": name,
+            "name": name or "",
             "params": params,
             "line": node.start_point[0] + 1,
             "end_line": node.end_point[0] + 1,
+            "anonymous": is_anon,
         })
 
     for node in _find_children(root, class_set):
-        name = _extract_name(node, source) or ""
+        name = _extract_name(node, source)[0] or ""
         result["classes"].append({
             "name": name,
             "line": node.start_point[0] + 1,

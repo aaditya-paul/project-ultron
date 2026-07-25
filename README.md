@@ -89,7 +89,9 @@ The program **never exits on errors** — clone failures, invalid commands, miss
 [2. AST Analysis]  ── Parse every supported source file    ✅ MVP done
      │                  (JS/TS, Python, Go, Java…)
      ▼
-[3. Flow Graph]  ── Cluster functions into logical flows   ✅ MVP done
+[3. Security Graph]  ── Security-focused graph: filters anonymous  ✅ MVP done
+     │                   callbacks, JSX noise, self-calls; classifies
+     │                   functions by security role & layer
      ▼
 [4. Taint Graph]  ── Track user input → sanitizers → sinks 🔲 planned
      ▼
@@ -99,6 +101,16 @@ The program **never exits on errors** — clone failures, invalid commands, miss
      ▼
 [7. Report]  ── Aggregated findings + remediation          🔲 planned
 ```
+
+### Security Graph Model
+
+The dependency graph is built with a **security-first** philosophy:
+
+- **Noise filtering**: Anonymous lambdas, JSX callbacks, array iteration callbacks (`map`/`filter`/`reduce`/`forEach`), and self-call edges are excluded
+- **Security role classification**: Each function is tagged as one of: `auth`, `database`, `endpoint`, `external_req`, `file_op`, `shell_exec`, `jwt`, `crypto`, `secrets`, `validation`, or `other`
+- **Layer separation**: Functions are grouped by `frontend`, `backend`, or `shared` based on file path patterns
+- **Role-colored visualization**: SVG nodes are color-coded by security role (pink = auth, green = database, blue = endpoint, etc.)
+- **JSON export**: Full graph with `security_roles` and `layers` breakdowns for LLM consumption
 
 ### Visual Representation (Per-Agent Peace-of-Mind View)
 
@@ -123,7 +135,11 @@ ultron/
 ├── detector.py           # language + framework detection
 ├── help.py               # help text display
 ├── parser.py             # Tree-sitter AST parsing (multi-language)
-├── graph.py              # Dependency graph builder + DOT/SVG render
+├── graph.py              # Security-focused graph builder
+│                         #   - Filters anonymous/noise functions
+│                         #   - Classifies by security role
+│                         #   - Separates frontend/backend layers
+│                         #   - DOT/SVG render with role-based coloring
 ├── clones/               # Cloned repositories land here
 ├── workspace/            # Per-project data (manifests, AST, graphs)
 ├── README.md
@@ -148,22 +164,27 @@ ultron/
 | Git | `subprocess` → `git clone` | — |
 | AST | `tree-sitter` (multi-language) | — |
 | LLM runtime | — | Ollama / llama.cpp |
-| Viz | Graphviz DOT / SVG | React + D3 / Cytoscape.js |
+| Viz | Graphviz DOT / SVG (role-colored) | React + D3 / Cytoscape.js |
 | Report | — | Markdown + JSON |
 
 ---
 
 ## MVP Scope
 
-**Phase 1 — Clone, Detect, Parse & Graph (current):**
+**Phase 1 — Clone, Detect, Parse & Security Graph (current):**
 - GitHub URL → clone via `git clone`
 - Existing repo detection with pull prompt
 - Language detection (Python, JS/TS, Go, Rust, Java, PHP, Ruby, C#, C/C++, …)
 - Framework detection (React, Next.js, Django, Flask, Spring Boot, Rails, …)
 - Workspace saved to `workspace/<project>/manifest.json` for cross-session use
 - Tree-sitter AST parsing — per-file functions, classes, imports, calls
-- Dependency graph — file→import and function→call edges
-- Graphviz DOT export (SVG if system `dot` binary available)
+- **Security-focused dependency graph:**
+  - Filters anonymous lambdas, JSX callbacks, array iteration noise
+  - Skips self-call edges
+  - Classifies functions by security role (auth, database, endpoint, crypto, etc.)
+  - Separates frontend/backend/shared layers
+  - Node colors by security role in SVG visualization
+- Graphviz DOT/SVG export with role-based coloring
 - `visualise` / `visualize` command
 - List cloned repositories
 - Delete individual or all repositories (cleans clone + workspace)
