@@ -1,0 +1,83 @@
+/clones
+/workspace
+
+
+# ─── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# ─── Testing / Linters / Type checkers ───────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.cache/
+
+# ─── Notebooks ───────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ─── Ultron-specific ─────────────────────────────────────
+# Cloned target repos (the CLI does `git clone` into cwd).
+# Safer to keep them out of the repo by default; whitelist explicitly if needed.
+repos/
+targets/
+workspaces/
+*.target/
+
+# Analysis output & reports
+reports/
+output/
+findings/
+*.report.json
+*.report.md
+
+# Local LLM model weights (large, never commit)
+models/*.gguf
+models/*.bin
+models/*.safetensors
+.ollama/
+
+# Agent run caches, scratch, taint-graph dumps
+.cache/
+*.taint.json
+*.flow.json
+.ultron/
+
+# Logs
+*.log
+logs/
+
+# ─── Editors / IDEs ──────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── OS ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini

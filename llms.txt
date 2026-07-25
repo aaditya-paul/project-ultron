@@ -1,0 +1,242 @@
+# Ultron — Multi-Agent Security Analysis Engine
+
+> A local-first multi-agent system that finds security flaws in source code — combining AST analysis, IR-based taint propagation, and specialized LLM agents.
+
+**Version:** 8.0.0 | **Language:** Python 3.10+ | **License:** MIT
+
+## Quick Start
+
+```bash
+pip install -r requirements.txt
+python ultron.py https://github.com/user/repo
+```
+
+Requires: system `git`, [Graphviz](https://graphviz.org/download/) for SVG rendering.
+
+## Core Architecture
+
+Ultron is a pipeline of independent phases, each producing cached output consumed by the next:
+
+```
+[URL] → [Clone] → [AST] → [IR Pipeline] → [Taint Engine] → [Rules + LLM] → [Report + SVGs]
+```
+
+### Phase 1 — AST Parsing (`parser.py`)
+Tree-sitter walks all detected languages (Python, JS, TS, TSX, Go, Rust, Java, C#, C, C++, PHP, Ruby, Kotlin, Swift), extracting functions, classes, imports, calls, and returns. Output: `workspace/<repo>/ast/ast.json`.
+
+### Phase 2 — IR Pipeline (`extractors/`)
+- **JsTsExtractor** (`extractors/js_ts.py`) — walks tree-sitter CST → `IRModule` with `IRFunction`, `IRCall`, `IRAssign`, `IRBranch`, `IRReturn` nodes + provenance edges + semantic tags
+- **SymbolResolver** (`extractors/resolver.py`) — global function index with three-tier call resolution (exact → receiver-type → qualified)
+- **CallGraph** (`extractors/call_graph.py`) — directed caller→callee graph with DFS path finding and cycle protection
+- **TaintEngine** (`extractors/taint_engine.py`) — backward propagation from sinks to sources through provenance edges; inter-procedural, sanitizer-aware (VALIDATION_GATE), deduplicated
+
+### Phase 3 — Detection
+- **Rules Engine** (`rules.py`) — 7 decorator-registered deterministic rules (missing auth, SQLi, path traversal, SSRF, etc.)
+- **LLM Detector** (`llm_detector.py`) — pre-filters trivially-safe flows, then runs multi-turn agentic analysis (READ_FILE, READ_FUNCTION, RECORD_FACT, FINISH) with consistency reconciliation
+
+### Visualization
+- **Dependency Graph** — role-colored file/function call graph
+- **Taint Graph** — source→intermediate→sink propagation paths
+- **Security Graph** — flow chains + Auth/Database/Network subgraphs
+
+## Key Files
+
+| File | Purpose |
+|---|---|
+| `ultron.py` | CLI entry point, interactive REPL, pipeline orchestrator |
+| `ir.py` | Intermediate Representation data model (11 dataclass types) |
+| `llm_client.py` | Local (Ollama/llama.cpp) & Cloud (Groq/Gemini/NVIDIA) LLM clients with caching, rate limiting, fallback |
+| `llm_detector.py` | Agentic LLM vulnerability detection with multi-turn tool use |
+| `rules.py` | Deterministic rule engine with decorator-based registration |
+| `parser.py` | Multi-language tree-sitter AST parser (13 languages) |
+| `cloner.py` | Git clone, pull, list, delete operations |
+| `detector.py` | Language/framework detection via marker files and extension counts |
+| `graph.py` | Dependency graph builder + Graphviz SVG renderer |
+| `taint_graph.py` | Taint propagation SVG renderer |
+| `security_graph.py` | Security graph builder (flows, auth/db/network subgraphs) |
+| `extractors/js_ts.py` | JS/TS → IR extraction (847 lines, convention-based tagging) |
+| `extractors/resolver.py` | Cross-file call resolution (3-tier) |
+| `extractors/call_graph.py` | Directed call graph with DFS path finding |
+| `extractors/taint_engine.py` | Backward taint propagation engine (428 lines) |
+| `ultron_config.json` | User configuration (LLM mode, models, API keys, rate limits) |
+| `requirements.txt` | Dependencies: tree-sitter + language grammars + graphviz |
+
+## CLI Reference
+
+```
+ultron <url>                      Clone repo and run full analysis
+ultron scan <name>                Re-analyze cloned repo
+ultron list                       List cloned repos
+ultron delete <name>              Delete clone + workspace
+ultron delete --all               Delete all clones + workspaces
+ultron visualise <name>           Regenerate SVGs from cached AST
+ultron config                     Show config
+ultron config <key> <val>         Set config value
+ultron config reset               Reset config to defaults
+```
+
+### Flags
+- `-v` / `--verbose` / `-d` / `--debug` — detailed tracing
+- `--visualise` / `--visualize` — open SVGs in browser
+- `--no-llm` — skip LLM detection (deterministic rules only)
+- `--mode local` / `--mode cloud` — override LLM mode
+
+### Interactive Mode
+Run `ultron` with no arguments. Commands: `list`, `scan`, `delete`, `visualise`, `config`, `help`, `exit`.
+
+## Configuration
+
+File: `ultron_config.json`. Manage via `ultron config`.
+
+### Key Settings
+| Key | Default | Description |
+|---|---|---|
+| `llm_mode` | `local` | `local` or `cloud` |
+| `use_llm` | `true` | Enable/disable LLM detection |
+| `verbose` | `false` | Tracing by default |
+| `visualise` | `false` | Auto-open SVGs |
+| `temperature` | `0.1` | LLM generation temperature |
+| `max_tokens` | `512` | Max tokens per response |
+| `timeout` | `30` | LLM API timeout (seconds) |
+| `num_workers` | `3` | Parallel worker threads |
+| `llm_url` | — | Local LLM base URL |
+| `enable_cache` | `true` | Cache LLM responses |
+| `cache_only` | `false` | Only use cached results |
+
+### Model Overrides
+```
+ultron config classifier <model>
+ultron config detector   <model>
+ultron config exploiter  <model>
+ultron config reporter   <model>
+ultron config default    <model>
+```
+
+### Cloud Providers
+Set API keys in `ultron_config.json`:
+- `groq` — `gsk_...`
+- `gemini` — `AI...`
+- `nvidia` — `nvapi-...`
+
+Chain: `["groq", "gemini", "nvidia"]` with automatic fallback.
+
+## IR Data Model (`ir.py`)
+
+11 dataclass types with JSON round-trip:
+
+### Expressions (value-producing)
+- `IRVar` — variable reference
+- `IRLiteral` — string, number, boolean, null
+- `IRAccess` — property access (e.g. `req.body.id`)
+- `IRCallExpr` — call within an expression
+
+### Statements
+- `IRCall` — function/method call statement
+- `IRAssign` — assignment statement
+- `IRBranch` — if/else branch
+- `IRReturn` — return statement
+- `IRFunction` — function definition
+
+### Metadata
+- `CallResolution` — maps call node to resolved target
+- `Edge` — data-flow provenance edge (source→target with transform, conditions, confidence)
+- `Tag` — semantic tag (SOURCE_HTTP, SINK_DATABASE, VALIDATION_GATE, etc.)
+- `IRModule` — per-file container (functions, edges, tags, call_resolutions)
+
+All nodes use deterministic 7-char hex IDs via MD5.
+
+### Semantic Tag Categories
+- **Sources:** `SOURCE_HTTP_BODY`, `SOURCE_HTTP_QUERY`, `SOURCE_HTTP_PARAMS`, `SOURCE_HTTP_HEADERS`, `SOURCE_ENV`, `SOURCE_SESSION`, `SOURCE_FILE_READ`
+- **Sinks:** `SINK_DATABASE`, `SINK_SHELL_EXEC`, `SINK_FILE_WRITE`, `SINK_NETWORK`, `SINK_HTTP_RESPONSE`
+- **Operations:** `OP_COERCION` (type cast), `OP_VALIDATION` (sanitization), `OP_AUTH` (auth check)
+- **Gates:** `VALIDATION_GATE` (raises sanitizer confidence to 0.85)
+- **Entry Points:** `HTTP_ENDPOINT`, `HTTP_ROUTE`, `EXPORTED_FN`
+
+## LLM Infrastructure
+
+### Local Client (`LocalLLMClient`)
+- Auto-detects Ollama, llama.cpp, or OpenAI-compatible API
+- Methods: `complete()`, `batch_complete()`, `is_available()`, `is_model_available()`
+
+### Cloud Client (`CloudLLMClient`)
+- Supports Groq, Gemini, NVIDIA with automatic fallback chain
+- Features: rate limiting (token-bucket + semaphore), exponential backoff (1s→2s→4s+jitter, max 30s), response caching (SHA-256 keyed, ~500 entry LRU)
+
+### Agentic Detection Protocol
+Each flow analysis uses a multi-turn tool-use loop (max 5 turns):
+- `READ_FILE <path>` — read a file from the target repo
+- `READ_FUNCTION <fn_id>` — read function body by IR node ID
+- `RECORD_FACT "<fact>"` — record a discovery
+- `FINISH {"verdict": "safe"|"likely_safe"|"suspicious"|"malicious", "vuln_type": "...", ...}`
+
+## Deterministic Rules (`rules.py`)
+
+7 rules registered via `@rule(name, severity, description)` decorator:
+
+| Rule | Severity | Detection |
+|---|---|---|
+| `unvalidated-source-to-sink` | HIGH | Any source→sink flow without validation |
+| `missing-authentication` | HIGH | Unprotected API routes |
+| `database-write-without-validation` | MEDIUM | DB writes on unvalidated paths |
+| `exposed-network-request` | MEDIUM | External requests on tainted paths |
+| `sql-injection-via-concat` | HIGH | String concatenation in DB calls |
+| `path-traversal` | HIGH | Path manipulation in file operations |
+| `ssrf-dynamic-url` | MEDIUM | Dynamic URL in network requests |
+
+## Security Graph Schema
+
+The security graph (`build_security_graph_from_ir()`) returns a dict:
+
+```python
+{
+  "flows": [{"id", "source", "source_fnid", "sink", "sink_fnid", "sink_type",
+              "path", "path_labels", "validated", "validators", "expressions", "operations"}],
+  "subgraphs": {
+    "auth": {"protected": [...], "unprotected": [...], "total", "protected_count", "unprotected_count"},
+    "database": {"operations": [...], "total"},
+    "network": {"operations": [...], "total"}
+  },
+  "summary": {"total_sources", "total_sinks", "total_routes", "total_flows",
+              "unvalidated_flows", "flows_by_sink_type"}
+}
+```
+
+## Testing
+
+86 tests across 5 files. Run with:
+
+```bash
+python -m pytest tests/ -v
+```
+
+- `tests/test_ir.py` (651 lines) — IR model construction, serialization, provenance edges, symbol resolution
+- `tests/test_phase3.py` (364 lines) — Call graph, sink detection, taint engine (basic, sanitized, dedup, cross-module)
+- `tests/test_agentic_detector.py` (265 lines) — GlobalMemory, discovery, agentic flow, consistency reconciliation
+- `tests/test_detector.py` (78 lines) — LLM detector integration with mock client
+- `tests/test_config.py` (42 lines) — Config loading and model override resolution
+
+## Design Principles
+
+1. **Local-first by default** — Code never leaves the machine. Zero API cost.
+2. **Convention over exhaustion** — Heuristic tagging for code semantics; security decisions deferred to LLM.
+3. **Deterministic + AI hybrid** — Fast rules run always; LLM adds deep analysis on flagged flows.
+4. **Pipeline architecture** — Each phase produces cached JSON consumed by the next; re-runnable independently.
+5. **Never exit on errors** — Clone failures, invalid commands — all loop back to the prompt.
+6. **Progressive enhancement** — More languages, deeper analysis, better LLM agents added incrementally.
+
+## Environment Variables
+
+- `ULTRON_LLM_MODE` — override `local`/`cloud`
+- `ULTRON_NO_LLM` — skip LLM detection
+- `ULTRON_DEBUG` — enable verbose tracing
+- `ULTRON_VISUALISE` — auto-open SVGs
+
+## Output Files
+
+All generated under `workspace/<repo>/`:
+- `manifest.json` — language/framework detection
+- `ast/ast.json` — parsed AST
+- `ir/` — IR modules
+- `dependency_graph.svg` — role-colored module dependency graph
+- `taint_graph.svg` — source→sink propagation paths
+- `security_graph.svg` — flow chains + subgraphs
