@@ -11,3 +11,4 @@ tree-sitter-php>=0.24
 tree-sitter-ruby>=0.23
 tree-sitter-kotlin>=1.1
 tree-sitter-swift>=0.7
+graphviz>=0.20
