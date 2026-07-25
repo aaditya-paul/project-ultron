@@ -20,10 +20,19 @@ A multi-agent system that finds security flaws in source code repositories by co
 ```bash
 # Run interactively
 python ultron.py
-# → then enter a repo URL at the prompt
 
 # Pass URL directly
 python ultron.py https://github.com/user/repo
+
+# List cloned repositories
+python ultron.py list
+
+# Scan an already-cloned repository
+python ultron.py scan <repo-name>
+
+# Delete a cloned repository
+python ultron.py delete <repo-name>
+python ultron.py delete --all
 
 # Show help
 python ultron.py --help
@@ -33,10 +42,14 @@ python ultron.py --help
 | Input | Action |
 |---|---|
 | `<repository-url>` | clone the target |
+| `list` | list cloned repositories |
+| `scan <repo-name>` | scan an already-cloned repository |
+| `delete <repo-name>` | delete a cloned repository |
+| `delete --all` | delete all cloned repositories |
 | `help` | show usage info |
 | `exit` / `quit` / `bye` | exit the program |
 
-On clone failure, the program re-prompts instead of crashing — try a different URL or type `exit`.
+If a repository already exists locally, you'll be prompted to pull latest changes instead of re-cloning. On clone failure, the program re-prompts instead of crashing.
 
 ---
 
@@ -99,7 +112,7 @@ ultron/
 ├── ultron.py             # Entry point (CLI + interactive loop)
 ├── colors.py             # ANSI color constants + console setup
 ├── banner.py             # ULTRON ASCII art + banner()
-├── cloner.py             # git clone logic
+├── cloner.py             # git clone, pull, list, delete repos
 ├── help.py               # help text display
 ├── clones/               # Cloned repositories land here
 ├── README.md
@@ -131,8 +144,11 @@ ultron/
 
 ## MVP Scope
 
-**Phase 1 — Clone (current):**
+**Phase 1 — Clone & Manage (current):**
 - GitHub URL → clone via `git clone`
+- Existing repo detection with pull prompt
+- List cloned repositories
+- Delete individual or all repositories
 - Interactive CLI with retry on failure
 - `--help` flag + inline help command
 - `exit`/`quit`/`bye` commands
