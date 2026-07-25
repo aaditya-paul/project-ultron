@@ -4,9 +4,23 @@ import re
 import hashlib
 from colors import CYAN, GRN, YLW, RED, RST, BOLD, DIM, WHT
 from ir import IRFunction, IRCall, IRAssign, IRBranch, IRReturn
+from cloner import WORKSPACE_DIR
 
 # In-memory cache for detector responses (complements cloud-level cache)
 _detector_cache = {}
+
+
+def _save_llm_findings(repo_name, security_graph, findings):
+    """Persist LLM findings to disk so partial results survive timeouts."""
+    out_dir = os.path.join(WORKSPACE_DIR, repo_name, "graph")
+    os.makedirs(out_dir, exist_ok=True)
+    spath = os.path.join(out_dir, "security_graph.json")
+    try:
+        data = {"security_graph": security_graph, "findings": findings}
+        with open(spath, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
 
 TRIVIALLY_SAFE_SINKS = {
     "console.log", "print", "printf", "fmt.Println", "logger.info",
@@ -848,7 +862,9 @@ def run_llm_detection(repo_name, security_graph, detector_client, ir_modules=Non
 
     if not flows:
         print(f"  {YLW}[!]{RST} no taint propagation paths found; running general LLM vulnerability scan...")
-        return run_llm_general_scan(target_path, security_graph, global_memory, detector_client, ir_modules, verbose)
+        findings = run_llm_general_scan(target_path, security_graph, global_memory, detector_client, ir_modules, verbose)
+        _save_llm_findings(repo_name, security_graph, findings)
+        return findings
 
     total = len(flows)
     skipped = 0
@@ -922,6 +938,8 @@ def run_llm_detection(repo_name, security_graph, detector_client, ir_modules=Non
             _detector_cache[cache_key] = {"vulnerable": False}
             print(f"    {GRN}[+] analyzed flow {flow_id}: marked safe (false positive or sanitised){RST}")
 
+        _save_llm_findings(repo_name, security_graph, findings)
+
     if skipped:
         print(f"  {DIM}[*] skipped {skipped}/{total} trivially safe flow(s) (saved LLM calls){RST}")
 
@@ -939,6 +957,7 @@ def run_llm_detection(repo_name, security_graph, detector_client, ir_modules=Non
             else:
                 _detector_cache[cache_key] = {"vulnerable": False}
 
+    _save_llm_findings(repo_name, security_graph, findings)
     return findings
 
 

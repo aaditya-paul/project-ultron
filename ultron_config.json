@@ -14,7 +14,7 @@
     "exploiter": "gemma4:e2b",
     "reporter": "gemma4:e2b"
   },
-  "llm_mode": "local",
+  "llm_mode": "cloud",
   "api_keys": {
     "groq": "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",
     "gemini": "AQ.Ab8RN6IT3eP85TCOxP9OSLozMFhP8oTzB46eNAMxYWsOzNXbsg",

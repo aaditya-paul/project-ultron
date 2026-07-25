@@ -20,6 +20,9 @@ Connect from opencode config:
 import os
 import sys
 import json
+import uuid
+import threading
+import traceback
 import argparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -35,6 +38,57 @@ from routes import (
     run_rules, run_llm_detection, run_full_analysis,
     get_findings, get_security_graph,
 )
+
+
+# ── Background task manager ────────────────────────────────────────────────
+
+_tasks: dict[str, dict] = {}
+_tasks_lock = threading.Lock()
+
+
+def _start_background_task(repo_name: str, fn, *args) -> str:
+    """Run a long operation in a background thread and return a task ID immediately."""
+    task_id = str(uuid.uuid4())[:8]
+    with _tasks_lock:
+        _tasks[task_id] = {
+            "repo_name": repo_name,
+            "status": "running",
+            "error": None,
+        }
+
+    def _run():
+        try:
+            fn(*args)
+            with _tasks_lock:
+                _tasks[task_id]["status"] = "completed"
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[Background Task {task_id}] FAILED:\n{tb}", file=sys.stderr, flush=True)
+            with _tasks_lock:
+                _tasks[task_id]["status"] = "failed"
+                _tasks[task_id]["error"] = f"{type(e).__name__}: {e}"
+
+    t = threading.Thread(target=_run, daemon=False)
+    t.start()
+    return task_id
+
+
+def _get_task_status(task_id: str) -> dict:
+    """Get the status of a background task (result excluded — use get_findings)."""
+    with _tasks_lock:
+        task = _tasks.get(task_id)
+        if not task:
+            return {"error": f"Task '{task_id}' not found", "status": "unknown"}
+        status = task["status"]
+        resp = {"status": status}
+        if status == "running":
+            resp["message"] = "Analysis still in progress. Try ultron_get_findings to check for partial results saved so far."
+        elif status == "completed":
+            resp["message"] = "Analysis complete. Use ultron_get_findings to see results."
+        elif status == "failed":
+            resp["error"] = task.get("error", "Unknown error")
+            resp["message"] = "Analysis failed. Try running individual steps."
+        return resp
 
 
 mcp = FastMCP(
@@ -56,20 +110,28 @@ def tool_list_repos() -> str:
 
 @mcp.tool(
     name="ultron_clone_repo",
-    description="Clone a Git repository and run the full security analysis pipeline on it.",
+    description="Clone a Git repository and run the full security analysis pipeline on it. Returns a task ID immediately; poll with ultron_get_task_status.",
 )
 def tool_clone_repo(url: str, pull_if_exists: bool = True) -> str:
-    result = clone_repo(url, pull_if_exists)
-    return _fmt(result)
+    task_id = _start_background_task(url, clone_repo, url, pull_if_exists)
+    return json.dumps({
+        "task_id": task_id,
+        "status": "started",
+        "message": f"Clone + analysis started (task {task_id}). Use ultron_get_task_status to poll for completion, then ultron_get_findings to see results."
+    })
 
 
 @mcp.tool(
     name="ultron_scan_repo",
-    description="Re-run the full security analysis on an already-cloned repository.",
+    description="Re-run the full security analysis on an already-cloned repository. Returns a task ID immediately; poll with ultron_get_task_status.",
 )
 def tool_scan_repo(name: str) -> str:
-    result = scan_repo(name)
-    return _fmt(result)
+    task_id = _start_background_task(name, scan_repo, name)
+    return json.dumps({
+        "task_id": task_id,
+        "status": "started",
+        "message": f"Re-scan started (task {task_id}). Use ultron_get_task_status to poll for completion."
+    })
 
 
 @mcp.tool(
@@ -139,11 +201,15 @@ def tool_run_llm_detection(repo_name: str) -> str:
 
 @mcp.tool(
     name="ultron_run_full_analysis",
-    description="Run the complete analysis pipeline: detection → AST → IR → taint → rules → LLM → visualisations.",
+    description="Run the complete analysis pipeline in the background: detection -> AST -> IR -> taint -> rules -> LLM -> visualisations. Returns a task ID immediately; poll with ultron_get_task_status.",
 )
 def tool_run_full_analysis(repo_name: str) -> str:
-    result = run_full_analysis(repo_name)
-    return _fmt(result)
+    task_id = _start_background_task(repo_name, run_full_analysis, repo_name)
+    return json.dumps({
+        "task_id": task_id,
+        "status": "started",
+        "message": f"Full analysis started (task {task_id}). Use ultron_get_task_status to poll for completion, then ultron_get_findings to see results."
+    })
 
 
 # ── Results tools ───────────────────────────────────────────────────────────
@@ -164,6 +230,14 @@ def tool_get_findings(repo_name: str) -> str:
 def tool_get_security_graph(repo_name: str) -> str:
     result = get_security_graph(repo_name)
     return _fmt(result)
+
+
+@mcp.tool(
+    name="ultron_get_task_status",
+    description="Poll the status of a previously started background task (from ultron_clone_repo, ultron_scan_repo, or ultron_run_full_analysis). Returns running/completed/failed. Use ultron_get_findings to retrieve results.",
+)
+def tool_get_task_status(task_id: str) -> str:
+    return json.dumps(_get_task_status(task_id))
 
 
 # ── Configuration tools ─────────────────────────────────────────────────────
