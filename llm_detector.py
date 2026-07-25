@@ -831,11 +831,6 @@ def run_llm_detection(repo_name, security_graph, detector_client, ir_modules=Non
     flows = security_graph.get("flows", [])
     findings = []
 
-    if not flows:
-        if verbose:
-            print("  [DEBUG] No taint flows found in security graph. LLM vulnerability detection skipped.")
-        return findings
-
     if not detector_client:
         return findings
 
@@ -850,6 +845,10 @@ def run_llm_detection(repo_name, security_graph, detector_client, ir_modules=Non
 
     # Global Discovery Phase to construct global context memory
     global_memory = run_llm_discovery(target_path, detector_client, ir_modules, verbose)
+
+    if not flows:
+        print(f"  {YLW}[!]{RST} no taint propagation paths found; running general LLM vulnerability scan...")
+        return run_llm_general_scan(target_path, security_graph, global_memory, detector_client, ir_modules, verbose)
 
     total = len(flows)
     skipped = 0
@@ -941,6 +940,90 @@ def run_llm_detection(repo_name, security_graph, detector_client, ir_modules=Non
                 _detector_cache[cache_key] = {"vulnerable": False}
 
     return findings
+
+
+def run_llm_general_scan(target_path, security_graph, global_memory, detector_client, ir_modules=None, verbose=False) -> list[dict]:
+    """General LLM vulnerability scan when no taint flows were automatically detected.
+
+    Uses the available metadata (routes, sources, subgraphs) and the global discovery
+    context to identify potential vulnerabilities that the taint engine missed.
+    """
+    summary = security_graph.get("summary", {})
+    subgraphs = security_graph.get("subgraphs", {})
+
+    file_list = []
+    if ir_modules:
+        file_list = [mod.file_path for mod in ir_modules]
+
+    auth_info = subgraphs.get("auth", {})
+    unprotected_routes = [r["route"] for r in auth_info.get("unprotected", []) if isinstance(r, dict)]
+
+    prompt = f"""You are a security auditor reviewing a codebase for vulnerabilities.
+No automatic taint propagation paths were found by the static analysis engine,
+but vulnerabilities may still exist (e.g. logic flaws, missing auth, injection points
+that the taint engine could not trace).
+
+Review the project metadata below and identify potential security issues.
+
+PROJECT STRUCTURE:
+- Total routes found: {summary.get("total_routes", 0)}
+- Total sources (attacker input points tagged in IR): {summary.get("total_sources", 0)}
+{("- Unprotected routes (no auth middleware detected): " + ", ".join(unprotected_routes[:20])) if unprotected_routes else ""}
+- Database operations: {json.dumps(subgraphs.get("database", {}).get("operations", [])[:10], indent=2)}
+
+FILES:
+{json.dumps(file_list[:60], indent=2) if file_list else "N/A"}
+
+{global_memory.to_string()}
+
+Based on all the above, identify potential security vulnerabilities. Consider:
+1. Routes that lack authentication or authorization
+2. Possible injection vulnerabilities (SQL, NoSQL, command) even without traced flows
+3. Missing input validation on user-facing endpoints
+4. Insecure direct object references (IDOR)
+5. Hardcoded secrets, credentials, or tokens
+6. Weak or missing CSRF / security headers
+7. Any other common web / API security issues
+
+Output ONLY a JSON array of findings (empty array if none):
+[
+  {{
+    "rule": "vulnerability-type",
+    "severity": "high",
+    "title": "Short title of the issue",
+    "description": "Detailed description of the vulnerability and where it occurs",
+    "source": "Attack vector or entry point",
+    "sink": "Vulnerable operation or endpoint",
+    "recommendation": "How to fix it"
+  }}
+]
+
+Output ONLY valid JSON. No markdown formatting, no code blocks."""
+
+    try:
+        response = detector_client.complete(prompt, max_tokens=1500)
+        cleaned = response.strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        if cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+        if not cleaned:
+            return []
+        findings = json.loads(cleaned)
+        if isinstance(findings, list):
+            for f in findings:
+                f["flow_id"] = "general-scan"
+            if verbose:
+                print(f"    [*] General scan returned {len(findings)} potential issue(s)")
+            return findings
+    except Exception as e:
+        if verbose:
+            print(f"    [-] General vulnerability scan failed: {e}")
+
+    return []
 
 
 # ── Legacy snippet-based fallback (when no IR data) ────────────────────────

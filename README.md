@@ -180,12 +180,20 @@ ultron/
 │   ├── resolver.py        # Cross-file symbol resolution
 │   ├── call_graph.py      # Directed caller→callee graph + DFS paths
 │   └── taint_engine.py    # Backward taint propagation engine
+├── routes/
+│   ├── __init__.py        # Re-exports all route functions
+│   ├── repo_routes.py     # Repository management routes
+│   ├── config_routes.py   # Configuration management routes
+│   ├── pipeline_routes.py # Analysis pipeline routes
+│   ├── server.py          # FastAPI HTTP server
+│   └── mcp_server.py      # MCP server (18 tools)
 ├── tests/                 # 86 tests (IR, phase-3 pipeline, config, detector)
 ├── clones/                # Cloned repositories
 ├── workspace/             # Per-project data (AST, graphs, IR)
 ├── project_assets/        # Logos and media
 ├── requirements.txt
 ├── ultron_config.json
+├── llms.txt              # LLM project description
 └── README.md
 ```
 
@@ -219,6 +227,205 @@ Tree-sitter walks all detected languages, extracting functions, classes, imports
 ### Phase 3 — Detection
 - **Rules Engine** — deterministic pre-LLM checks: missing auth, unvalidated flows, DB writes without validation
 - **LLM Detector** — takes candidate taint paths, extracts relevant code sections (80–95% token reduction), pre-filters safe flows, then checks with an LLM. Retries on malformed JSON. Results cached per session.
+
+---
+
+## API & Integrations
+
+Ultron exposes its full feature set through three layered interfaces: a Python callable API for programmatic use, an HTTP REST API for remote access, and an MCP server for AI-assisted tools.
+
+---
+
+### Python API (`routes/`)
+
+Every terminal command is available as a standalone Python function in the `routes/` package. Each function takes typed parameters and returns structured dicts — no side effects, no console printing.
+
+```python
+from routes import list_repos, clone_repo, get_findings, get_config, run_full_analysis
+
+# List all cloned repositories
+repos = list_repos()
+
+# Clone and analyze a repository
+result = clone_repo("https://github.com/user/repo")
+
+# Run the full analysis pipeline on an existing clone
+analysis = run_full_analysis("my-repo")
+
+# Get cached findings from a previous scan
+findings = get_findings("my-repo")
+
+# Check configuration
+config = get_config()
+```
+
+| Module | Functions |
+|---|---|
+| `routes.repo_routes` | `list_repos`, `clone_repo`, `scan_repo`, `get_repo_status`, `delete_repo`, `delete_all_repos`, `visualise_repo` |
+| `routes.pipeline_routes` | `run_detection`, `run_ast_parse`, `run_ir_pipeline`, `run_rules`, `run_llm_detection`, `run_full_analysis`, `get_findings`, `get_security_graph` |
+| `routes.config_routes` | `get_config`, `get_config_value`, `set_config_value`, `reset_config`, `set_model_override`, `get_api_keys_status` |
+
+---
+
+### HTTP REST API
+
+A FastAPI server wrapping all route functions. Auto-generated OpenAPI docs at `/docs`.
+
+```bash
+pip install fastapi uvicorn
+python -m routes.server
+# → listening on http://127.0.0.1:8742
+```
+
+#### Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/health` | Health check |
+| **Repositories** | | |
+| `GET` | `/api/repos` | List cloned repositories |
+| `POST` | `/api/repos/clone` | Clone and analyze |
+| `POST` | `/api/repos/scan` | Re-analyze existing clone |
+| `GET` | `/api/repos/{name}` | Repository status |
+| `DELETE` | `/api/repos/{name}` | Delete a repository |
+| `DELETE` | `/api/repos` | Delete all repositories |
+| `POST` | `/api/repos/{name}/visualise` | Regenerate SVGs |
+| **Analysis** | | |
+| `POST` | `/api/repos/{name}/analysis/detection` | Language/framework detection |
+| `POST` | `/api/repos/{name}/analysis/ast` | AST parsing |
+| `POST` | `/api/repos/{name}/analysis/rules` | Deterministic rules |
+| `POST` | `/api/repos/{name}/analysis/llm` | LLM detection |
+| `POST` | `/api/repos/{name}/analysis/full` | Full pipeline |
+| **Results** | | |
+| `GET` | `/api/repos/{name}/findings` | Cached findings |
+| `GET` | `/api/repos/{name}/security-graph` | Cached security graph |
+| **Configuration** | | |
+| `GET` | `/api/config` | Show config |
+| `GET` | `/api/config/{key}` | Get single value |
+| `POST` | `/api/config` | Set a value |
+| `POST` | `/api/config/model-override` | Set per-agent model |
+| `GET` | `/api/config/api-keys` | Check API key status |
+| `POST` | `/api/config/reset` | Reset to defaults |
+
+```bash
+# Example usage
+curl -X POST http://127.0.0.1:8742/api/repos/clone \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://github.com/user/repo"}'
+
+curl http://127.0.0.1:8742/api/repos
+```
+
+---
+
+### MCP Server
+
+The MCP (Model Context Protocol) server exposes Ultron as 18 tools that AI assistants can invoke directly. Compatible with any MCP client — opencode, Claude Desktop, Cursor, VS Code with Copilot Agent Mode, and others.
+
+```bash
+# Start with stdio transport (default — for desktop MCP clients)
+python routes/mcp_server.py
+
+# Start with SSE transport (for web-based MCP clients)
+python routes/mcp_server.py --sse --port 8743
+```
+
+#### Tools
+
+| Tool | Description | Category |
+|---|---|---|
+| `ultron_list_repos` | List all cloned repositories with analysis status | Repository |
+| `ultron_clone_repo` | Clone a Git repo and run full security analysis | Repository |
+| `ultron_scan_repo` | Re-run full analysis on an existing clone | Repository |
+| `ultron_get_repo_status` | Detailed status: workspace, AST, graphs, remote URL | Repository |
+| `ultron_delete_repo` | Delete a cloned repository and its workspace | Repository |
+| `ultron_visualise_repo` | Regenerate dependency/taint/security SVGs from cached AST | Repository |
+| `ultron_run_detection` | Detect languages and frameworks | Analysis |
+| `ultron_run_ast_parse` | Parse all source files into an AST | Analysis |
+| `ultron_run_rules` | Run deterministic rules (SQLi, path traversal, SSRF, etc.) | Analysis |
+| `ultron_run_llm_detection` | Run LLM-powered vulnerability detection | Analysis |
+| `ultron_run_full_analysis` | Full pipeline: detection → AST → IR → taint → rules → LLM | Analysis |
+| `ultron_get_findings` | Get cached security findings from a previous scan | Results |
+| `ultron_get_security_graph` | Get full cached security graph (flows, subgraphs, summary) | Results |
+| `ultron_get_config` | Show full configuration | Configuration |
+| `ultron_set_config_value` | Set a configuration value | Configuration |
+| `ultron_set_model_override` | Set LLM model for a specific agent part | Configuration |
+| `ultron_get_api_keys_status` | Check which cloud API keys are configured | Configuration |
+| `ultron_reset_config` | Reset configuration to factory defaults | Configuration |
+
+#### Connecting from opencode
+
+Add to your `opencode.json` or `.opencode/global.json`:
+
+```json
+{
+  "mcpServers": {
+    "ultron": {
+      "command": "python",
+      "args": ["routes/mcp_server.py"]
+    }
+  }
+}
+```
+
+#### Connecting from Claude Desktop
+
+Add to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "ultron": {
+      "command": "python",
+      "args": ["C:\\path\\to\\ultron\\routes\\mcp_server.py"]
+    }
+  }
+}
+```
+
+#### Connecting from VS Code (Copilot Agent Mode)
+
+Configure in VS Code settings or `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "ultron": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["routes/mcp_server.py"]
+    }
+  }
+}
+```
+
+#### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  MCP Client (opencode, Claude Desktop, VS Code, …)                │
+└──────────────────────┬──────────────────────────────────────────────┘
+                       │ JSON-RPC (stdio / SSE)
+┌──────────────────────▼──────────────────────────────────────────────┐
+│  routes/mcp_server.py                                              │
+│    FastMCP("ultron") — 18 tools                                    │
+│                                                                     │
+│  ultron_clone_repo    ultron_run_rules      ultron_get_config      │
+│  ultron_scan_repo     ultron_run_llm_detection    ...              │
+└──────────────────────┬──────────────────────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────────────────────┐
+│  routes/ package — callable Python API (no side effects)           │
+│  routes/repo_routes.py    routes/pipeline_routes.py                │
+│  routes/config_routes.py                                           │
+└──────────────────────┬──────────────────────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────────────────────┐
+│  ultron.py modules — core engine                                   │
+│  cloner  parser  ir  graph  rules  llm_client  llm_detector       │
+│  extractors/js_ts  resolver  call_graph  taint_engine              │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
