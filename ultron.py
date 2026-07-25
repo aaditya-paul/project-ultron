@@ -103,8 +103,35 @@ def run_ir_analysis(repo_name, target, ir_modules, call_graph, taint_paths):
 
     config = load_config()
     mode = os.environ.get("ULTRON_LLM_MODE") or config.get("llm_mode", "local")
-    use_llm = os.environ.get("ULTRON_NO_LLM") != "1"
 
+    print(f"  {CYAN}[*]{RST} building security graph from IR data...")
+    security_graph = build_security_graph_from_ir(ir_modules, call_graph, taint_paths)
+
+    print(f"  {CYAN}[*]{RST} running deterministic rules...")
+    findings = list(run_rules(security_graph))
+    show_findings(findings)
+    print_terminal_taint(security_graph)
+
+    print(f"  {CYAN}[*]{RST} generating dependency graph...")
+    dep_graph = build_ir_dependency_graph(ir_modules, call_graph)
+    gpath = save_graph(WORKSPACE_DIR, repo_name, dep_graph)
+    show_graph_summary(dep_graph)
+    if gpath:
+        print(f"  {DIM}[*]{RST} DOT file saved -> {WHT}{gpath}{RST}")
+
+    dep_out = os.path.join(out_dir, "dependency_graph.svg")
+    dep_vis = render_graph(dep_graph, dep_out)
+    if dep_vis:
+        print(f"  {GRN}[+]{RST} dependency visualisation saved -> {WHT}{dep_vis}{RST}")
+
+    if taint_paths:
+        taint_out = os.path.join(out_dir, "taint_graph.svg")
+        taint_vis = render_taint_graph(taint_paths, taint_out)
+        if taint_vis:
+            print(f"  {GRN}[+]{RST} taint propagation visualisation saved -> {WHT}{taint_vis}{RST}")
+
+    # --- LLM initialization + detector (can be slow) ---
+    use_llm = os.environ.get("ULTRON_NO_LLM") != "1"
     detector_client = None
 
     if use_llm:
@@ -132,34 +159,6 @@ def run_ir_analysis(repo_name, target, ir_modules, call_graph, taint_paths):
     else:
         print(f"  {DIM}[*]{RST} LLM detection disabled (use_llm=false or --no-llm)")
 
-    print(f"  {CYAN}[*]{RST} building security graph from IR data...")
-    security_graph = build_security_graph_from_ir(ir_modules, call_graph, taint_paths)
-
-    print(f"  {CYAN}[*]{RST} running deterministic rules...")
-    findings = list(run_rules(security_graph))
-    show_findings(findings)
-    print_terminal_taint(security_graph)
-
-    # --- Generate visualizations (before LLM, so user sees them immediately) ---
-    print(f"  {CYAN}[*]{RST} generating dependency graph...")
-    dep_graph = build_ir_dependency_graph(ir_modules, call_graph)
-    gpath = save_graph(WORKSPACE_DIR, repo_name, dep_graph)
-    show_graph_summary(dep_graph)
-    if gpath:
-        print(f"  {DIM}[*]{RST} DOT file saved -> {WHT}{gpath}{RST}")
-
-    dep_out = os.path.join(out_dir, "dependency_graph.svg")
-    dep_vis = render_graph(dep_graph, dep_out)
-    if dep_vis:
-        print(f"  {GRN}[+]{RST} dependency visualisation saved -> {WHT}{dep_vis}{RST}")
-
-    if taint_paths:
-        taint_out = os.path.join(out_dir, "taint_graph.svg")
-        taint_vis = render_taint_graph(taint_paths, taint_out)
-        if taint_vis:
-            print(f"  {GRN}[+]{RST} taint propagation visualisation saved -> {WHT}{taint_vis}{RST}")
-
-    # --- LLM detector (can be slow) ---
     if detector_client and detector_client.is_available():
         llm_findings = run_llm_detection(repo_name, security_graph, detector_client, verbose=False)
         findings.extend(llm_findings)
