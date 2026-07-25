@@ -115,8 +115,10 @@ ultron/
 ├── colors.py             # ANSI color constants + console setup
 ├── banner.py             # ULTRON ASCII art + banner()
 ├── cloner.py             # git clone, pull, list, delete repos
+├── detector.py           # language + framework detection
 ├── help.py               # help text display
 ├── clones/               # Cloned repositories land here
+├── workspace/            # Per-project manifests (languages, frameworks, metadata)
 ├── README.md
 └── .gitignore
 ```
@@ -146,12 +148,15 @@ ultron/
 
 ## MVP Scope
 
-**Phase 1 — Clone & Manage (current):**
+**Phase 1 — Clone, Detect & Manage (current):**
 - GitHub URL → clone via `git clone`
 - Existing repo detection with pull prompt
+- Language detection (Python, JS/TS, Go, Rust, Java, PHP, Ruby, C#, C/C++, …)
+- Framework detection (React, Next.js, Django, Flask, Spring Boot, Rails, …)
+- Workspace saved to `workspace/<project>/manifest.json` for cross-session use
 - List cloned repositories
 - Delete individual or all repositories
-- Interactive CLI with retry on failure
+- Interactive CLI with retry on failure — **never exits on errors**
 - `--help` flag + inline help command
 - `exit`/`quit`/`bye` commands
 

@@ -2,20 +2,26 @@ import sys
 
 from colors import CYAN, RED, GRN, WHT, DIM, RST
 from banner import banner
-from cloner import clone_repo, list_repos, delete_repo, delete_all_repos, repo_exists, repo_path
-from detector import detect_project_types, show_detected_types
+from cloner import clone_repo, list_repos, delete_repo, delete_all_repos, repo_exists, repo_path, extract_repo_name
+from detector import analyze_project, show_detected_types, save_workspace_manifest
 from help import show_help
+
+def analyze_and_save(repo_url, repo_name):
+    target = repo_path(repo_name)
+    print(f"  {DIM}[*]{RST} switched to {WHT}{target}{RST}")
+    print()
+    analysis = analyze_project(target)
+    show_detected_types(repo_name, analysis)
+
+    manifest = save_workspace_manifest(repo_name, repo_url, analysis)
+    print(f"  {DIM}[*]{RST} workspace saved -> {WHT}{manifest}{RST}")
 
 def cmd_clone(url):
     repo_name = clone_repo(url)
     if not repo_name:
         return False
 
-    target = repo_path(repo_name)
-    print(f"  {DIM}[*]{RST} switched to {WHT}{target}{RST}")
-    print()
-    types = detect_project_types(target)
-    show_detected_types(repo_name, types)
+    analyze_and_save(url, repo_name)
     return True
 
 def cmd_scan(name):
@@ -25,8 +31,10 @@ def cmd_scan(name):
     target = repo_path(name)
     print(f"  {DIM}[*]{RST} switched to {WHT}{target}{RST}")
     print()
-    types = detect_project_types(target)
-    show_detected_types(name, types)
+    analysis = analyze_project(target)
+    show_detected_types(name, analysis)
+    manifest = save_workspace_manifest(name, f"clones/{name}", analysis)
+    print(f"  {DIM}[*]{RST} workspace saved -> {WHT}{manifest}{RST}")
     print()
     print(f"  {DIM}[*]{RST} scanner not yet implemented — coming in Phase 2.")
 
