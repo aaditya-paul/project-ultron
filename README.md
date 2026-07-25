@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="project_assets/ultron_terminal_logo.svg">
-  <img alt="ULTRON — multi-agent security analysis" src="project_assets/ultron_terminal_logo.svg" width="100%">
+ <img width="1182" height="441" alt="image" src="https://github.com/user-attachments/assets/111364a6-f968-479a-bef8-87e3444fbe5b" />
+
 </picture>
 
 <br>
