@@ -6,11 +6,11 @@ A multi-agent system that finds security flaws in source code repositories by co
 
 ## Current Status
 
-**Phase: MVP scaffolding** — the repository cloner is implemented. The full pipeline (AST, taint, agents, viz, report) is designed and coming next.
+**Phase: AST Analysis & Dependency Graph complete** — cloning, language/framework detection, AST parsing (tree-sitter), dependency graph building, and DOT/SVG visualization are implemented. Taint tracking and security agents are coming next.
 
 ```
-[GitHub URL]  →  [1. Clone]  →  (AST · Flow · Taint · Agents · Viz · Report)
-                   ▲ done        ▲ planned (in order)
+[GitHub URL]  →  [1. Clone]  →  [2. AST]  →  [3. Flow Graph]  →  (Taint · Agents · Viz · Report)
+                   ▲ done        ▲ done       ▲ done              ▲ planned (in order)
 ```
 
 ---
@@ -30,6 +30,10 @@ python ultron.py list
 # Scan an already-cloned repository
 python ultron.py scan <repo-name>
 
+# Build and export dependency graph visualization
+python ultron.py visualise <repo-name>
+python ultron.py visualize <repo-name>
+
 # Delete a cloned repository
 python ultron.py delete <repo-name>
 python ultron.py delete --all
@@ -46,6 +50,7 @@ python ultron.py --help
 | `scan <repo-name>` | scan an already-cloned repository |
 | `delete <repo-name>` | delete a cloned repository |
 | `delete --all` | delete all cloned repositories |
+| `visualise <name>` / `visualize <name>` | build and export dependency graph (DOT/SVG) |
 | `help` | show usage info |
 | `exit` / `quit` / `bye` | exit the program |
 
@@ -81,16 +86,16 @@ The program **never exits on errors** — clone failures, invalid commands, miss
 [1. Clone]  ── git clone via subprocess into clones/       ✅ MVP done
      │
      ▼
-[2. AST Analysis]  ── Parse every supported source file    🔲 planned
+[2. AST Analysis]  ── Parse every supported source file    ✅ MVP done
      │                  (JS/TS, Python, Go, Java…)
      ▼
-[3. Flow Graph]  ── Cluster functions into logical flows   🔲 planned
+[3. Flow Graph]  ── Cluster functions into logical flows   ✅ MVP done
      ▼
 [4. Taint Graph]  ── Track user input → sanitizers → sinks 🔲 planned
      ▼
 [5. Security Agents]  ── 6 specialized agents              🔲 planned
      ▼
-[6. Visualization]  ── Live per-agent view                 🔲 planned
+[6. Visualization]  ── Dependency graph (DOT/SVG)         ✅ MVP done
      ▼
 [7. Report]  ── Aggregated findings + remediation          🔲 planned
 ```
@@ -117,8 +122,10 @@ ultron/
 ├── cloner.py             # git clone, pull, list, delete repos
 ├── detector.py           # language + framework detection
 ├── help.py               # help text display
+├── parser.py             # Tree-sitter AST parsing (multi-language)
+├── graph.py              # Dependency graph builder + DOT/SVG render
 ├── clones/               # Cloned repositories land here
-├── workspace/            # Per-project manifests (languages, frameworks, metadata)
+├── workspace/            # Per-project data (manifests, AST, graphs)
 ├── README.md
 └── .gitignore
 ```
@@ -139,30 +146,32 @@ ultron/
 | Language | Python 3 (stdlib) | — |
 | CLI | `argparse` (manual) | Typer / Rich |
 | Git | `subprocess` → `git clone` | — |
-| AST | — | `tree-sitter` (multi-language) |
+| AST | `tree-sitter` (multi-language) | — |
 | LLM runtime | — | Ollama / llama.cpp |
-| Viz | — | React + D3 / Cytoscape.js |
+| Viz | Graphviz DOT / SVG | React + D3 / Cytoscape.js |
 | Report | — | Markdown + JSON |
 
 ---
 
 ## MVP Scope
 
-**Phase 1 — Clone, Detect & Manage (current):**
+**Phase 1 — Clone, Detect, Parse & Graph (current):**
 - GitHub URL → clone via `git clone`
 - Existing repo detection with pull prompt
 - Language detection (Python, JS/TS, Go, Rust, Java, PHP, Ruby, C#, C/C++, …)
 - Framework detection (React, Next.js, Django, Flask, Spring Boot, Rails, …)
 - Workspace saved to `workspace/<project>/manifest.json` for cross-session use
+- Tree-sitter AST parsing — per-file functions, classes, imports, calls
+- Dependency graph — file→import and function→call edges
+- Graphviz DOT export (SVG if system `dot` binary available)
+- `visualise` / `visualize` command
 - List cloned repositories
-- Delete individual or all repositories
+- Delete individual or all repositories (cleans clone + workspace)
 - Interactive CLI with retry on failure — **never exits on errors**
 - `--help` flag + inline help command
 - `exit`/`quit`/`bye` commands
 
 **Phase 2 — Analysis (planned):**
-- AST analysis for **at least 2 languages** (start with Python + JS/TS)
-- Call graph + flow clustering
 - Taint graph for input → sink
 - All 6 security agents running
 - Live visualization per agent
@@ -201,11 +210,14 @@ ultron/
 git clone https://github.com/<you>/ultron
 cd ultron
 
+# Install dependencies
+pip install -r requirements.txt
+
 # Run
 python ultron.py https://github.com/<owner>/<repo>
 ```
 
-No dependencies — pure Python 3 + system `git`.
+Requires Python 3, system `git`, and `pip install -r requirements.txt` (tree-sitter + language parsers). For SVG rendering, install Graphviz system binaries from https://graphviz.org/download/.
 
 ---
 

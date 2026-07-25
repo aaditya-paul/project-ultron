@@ -1,4 +1,5 @@
 import os
+import stat
 import shutil
 import subprocess
 
@@ -38,10 +39,17 @@ def get_remote_url(repo_name):
 def workspace_path(repo_name):
     return os.path.join(WORKSPACE_DIR, repo_name)
 
+def _rmtree(path):
+    def _onerror(func, p, exc_info):
+        os.chmod(p, stat.S_IWRITE)
+        func(p)
+    if os.path.isdir(path):
+        shutil.rmtree(path, onerror=_onerror)
+
 def delete_workspace(repo_name):
     ws = workspace_path(repo_name)
     if os.path.isdir(ws):
-        shutil.rmtree(ws)
+        _rmtree(ws)
         print(f"  {GRN}[+]{RST} {WHT}{repo_name}{RST} workspace deleted.")
 
 def pull_repo(target_dir):
@@ -117,7 +125,7 @@ def delete_repo(repo_name):
         print(f"  {DIM}[*]{RST} skipped.")
         return False
 
-    shutil.rmtree(target)
+    _rmtree(target)
     print(f"  {GRN}[+]{RST} {WHT}{repo_name}{RST} deleted.")
     delete_workspace(repo_name)
     return True
@@ -141,6 +149,6 @@ def delete_all_repos():
         return
 
     for r in repos:
-        shutil.rmtree(repo_path(r))
+        _rmtree(repo_path(r))
         print(f"  {GRN}[+]{RST} {WHT}{r}{RST} deleted.")
         delete_workspace(r)
