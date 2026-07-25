@@ -943,65 +943,96 @@ def run_llm_detection(repo_name, security_graph, detector_client, ir_modules=Non
 
 
 def run_llm_general_scan(target_path, security_graph, global_memory, detector_client, ir_modules=None, verbose=False) -> list[dict]:
-    """General LLM vulnerability scan when no taint flows were automatically detected.
+    """Agentic general vulnerability scan when no taint flows were automatically detected.
 
     Uses the available metadata (routes, sources, subgraphs) and the global discovery
-    context to identify potential vulnerabilities that the taint engine missed.
+    context to identify potential vulnerabilities. The LLM can read files and functions
+    to verify each issue before reporting it, producing confident findings instead of
+    speculative "check recommended" warnings.
     """
     summary = security_graph.get("summary", {})
     subgraphs = security_graph.get("subgraphs", {})
 
     file_list = []
+    fn_boundaries = {}
     if ir_modules:
         file_list = [mod.file_path for mod in ir_modules]
+        fn_boundaries = _build_function_boundaries(ir_modules)
 
     auth_info = subgraphs.get("auth", {})
     unprotected_routes = [r["route"] for r in auth_info.get("unprotected", []) if isinstance(r, dict)]
 
-    prompt = f"""You are a security auditor reviewing a codebase for vulnerabilities.
+    prompt = f"""You are an agentic security code auditor.
 No automatic taint propagation paths were found by the static analysis engine,
-but vulnerabilities may still exist (e.g. logic flaws, missing auth, injection points
-that the taint engine could not trace).
+but vulnerabilities may still exist (e.g. logic flaws, missing auth, injection
+points that the taint engine could not trace). Your job is to explore the codebase
+and find ANY genuine, exploitable security vulnerabilities.
 
-Review the project metadata below and identify potential security issues.
+You have access to a Global Memory representing context about the repository,
+and you can request to inspect files or functions to verify potential issues.
 
-PROJECT STRUCTURE:
+PROJECT METADATA:
 - Total routes found: {summary.get("total_routes", 0)}
 - Total sources (attacker input points tagged in IR): {summary.get("total_sources", 0)}
-{("- Unprotected routes (no auth middleware detected): " + ", ".join(unprotected_routes[:20])) if unprotected_routes else ""}
-- Database operations: {json.dumps(subgraphs.get("database", {}).get("operations", [])[:10], indent=2)}
+- Unprotected routes (no auth middleware detected): {", ".join(unprotected_routes[:20]) if unprotected_routes else "None"}
+{("- Database operations: " + json.dumps(subgraphs.get("database", {}).get("operations", [])[:10], indent=2)) if subgraphs.get("database", {}).get("operations") else ""}
 
-FILES:
+FILES IN PROJECT:
 {json.dumps(file_list[:60], indent=2) if file_list else "N/A"}
 
 {global_memory.to_string()}
 
-Based on all the above, identify potential security vulnerabilities. Consider:
-1. Routes that lack authentication or authorization
-2. Possible injection vulnerabilities (SQL, NoSQL, command) even without traced flows
-3. Missing input validation on user-facing endpoints
-4. Insecure direct object references (IDOR)
-5. Hardcoded secrets, credentials, or tokens
-6. Weak or missing CSRF / security headers
-7. Any other common web / API security issues
+YOUR TOOLS (ACTIONS):
+You can perform one action per turn by returning a JSON block matching one of these formats:
 
-Output ONLY a JSON array of findings (empty array if none):
-[
-  {{
-    "rule": "vulnerability-type",
-    "severity": "high",
-    "title": "Short title of the issue",
-    "description": "Detailed description of the vulnerability and where it occurs",
-    "source": "Attack vector or entry point",
-    "sink": "Vulnerable operation or endpoint",
-    "recommendation": "How to fix it"
-  }}
-]
+1. Read a specific file to inspect logic/validation:
+{{"action": "READ_FILE", "path": "path/to/file", "start_line": 1, "end_line": 50}}
 
-Output ONLY valid JSON. No markdown formatting, no code blocks."""
+2. Read a function definition from the IR index:
+{{"action": "READ_FUNCTION", "name": "function_name"}}
 
-    try:
-        response = detector_client.complete(prompt, max_tokens=1500)
+3. Add a persistent security-relevant fact to Global Memory:
+{{"action": "RECORD_FACT", "fact": "Description of the fact (e.g. function validateEmail() uses regex)"}}
+
+4. Finish your analysis and output ALL findings:
+{{
+  "action": "FINISH",
+  "findings": [
+    {{
+      "rule": "xss",
+      "severity": "high",
+      "title": "Stored XSS in comment submission",
+      "description": "Detailed description of the vulnerability and where it occurs, including file paths and line numbers you verified",
+      "source": "Attack vector or entry point (e.g. HTTP request body)",
+      "sink": "Vulnerable operation or endpoint (e.g. res.send() with unsanitized input)",
+      "recommendation": "How to fix it (e.g. use DOMPurify or escape output)",
+      "trace": "Actual code locations you read, showing the vulnerable path"
+    }}
+  ]
+}}
+
+CRITICAL RULES:
+- Actually READ the relevant files to verify each vulnerability before reporting it!
+- Do NOT guess or speculate — only report issues you have confirmed by reading code.
+- If you cannot confirm any vulnerability, return {{"action": "FINISH", "findings": []}}.
+- You can make up to 5 actions/turns. Make file reads focused and small (max 50 lines).
+- Return ONLY valid JSON, starting with {{ and ending with }}. No conversational markdown or extra text.
+"""
+
+    history = [{"role": "user", "content": prompt}]
+    max_turns = 5
+
+    for turn in range(max_turns):
+        transcript = ""
+        for msg in history:
+            role = "Assistant" if msg["role"] == "assistant" else "User"
+            transcript += f"{role}: {msg['content']}\n\n"
+        transcript += "Assistant: "
+
+        response = detector_client.complete(transcript, max_tokens=800)
+        if not response or not response.strip():
+            break
+
         cleaned = response.strip()
         if cleaned.startswith("```json"):
             cleaned = cleaned[7:]
@@ -1010,18 +1041,142 @@ Output ONLY valid JSON. No markdown formatting, no code blocks."""
         if cleaned.endswith("```"):
             cleaned = cleaned[:-3]
         cleaned = cleaned.strip()
-        if not cleaned:
+
+        history.append({"role": "assistant", "content": response})
+
+        try:
+            action_data = json.loads(cleaned)
+        except Exception as e:
+            history.append({
+                "role": "user",
+                "content": f"Failed to parse your response as JSON: {e}. Please respond with ONLY valid JSON."
+            })
+            continue
+
+        action_name = action_data.get("action")
+        if action_name == "FINISH":
+            raw_findings = action_data.get("findings", [])
+            if isinstance(raw_findings, list):
+                for f in raw_findings:
+                    f["flow_id"] = "general-scan"
+                if verbose:
+                    print(f"    [*] Agentic general scan returned {len(raw_findings)} confirmed finding(s)")
+                return raw_findings
             return []
-        findings = json.loads(cleaned)
-        if isinstance(findings, list):
-            for f in findings:
+
+        elif action_name == "READ_FILE":
+            fpath = action_data.get("path")
+            start = int(action_data.get("start_line", 1))
+            end = int(action_data.get("end_line", 50))
+
+            abs_path = os.path.join(target_path, fpath) if fpath else ""
+            if not fpath or not os.path.isfile(abs_path):
+                found = False
+                if fpath:
+                    for r, _, files in os.walk(target_path):
+                        for file in files:
+                            if file == os.path.basename(fpath):
+                                abs_path = os.path.join(r, file)
+                                fpath = os.path.relpath(abs_path, target_path)
+                                found = True
+                                break
+                        if found:
+                            break
+
+            content = ""
+            if fpath and os.path.isfile(abs_path):
+                try:
+                    with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
+                        lines = f.readlines()
+                        content = "".join(lines[max(0, start-1):min(len(lines), end)])
+                except Exception as ex:
+                    content = f"Error reading file: {ex}"
+            else:
+                content = f"File not found: {fpath}"
+
+            history.append({
+                "role": "user",
+                "content": f"Result of READ_FILE({fpath}, lines {start}-{end}):\n```\n{content}\n```"
+            })
+            if verbose:
+                print(f"      [Agent Action] READ_FILE {fpath} (lines {start}-{end})")
+
+        elif action_name == "READ_FUNCTION":
+            fn_name = action_data.get("name")
+            fn_info = None
+            fpath_found = None
+            if fn_boundaries:
+                for fp, fns in fn_boundaries.items():
+                    for f_info in fns:
+                        if f_info["name"] == fn_name:
+                            fn_info = f_info
+                            fpath_found = fp
+                            break
+                    if fn_info:
+                        break
+
+            content = ""
+            if fn_info and fpath_found:
+                abs_path = os.path.join(target_path, fpath_found)
+                try:
+                    with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
+                        lines = f.readlines()
+                        content = "".join(lines[max(0, fn_info["start"]-1):min(len(lines), fn_info["end"])])
+                except Exception as ex:
+                    content = f"Error reading function: {ex}"
+            else:
+                content = f"Function '{fn_name}' not found in IR index."
+
+            history.append({
+                "role": "user",
+                "content": f"Result of READ_FUNCTION({fn_name}):\n```\n{content}\n```"
+            })
+            if verbose:
+                print(f"      [Agent Action] READ_FUNCTION {fn_name}")
+
+        elif action_name == "RECORD_FACT":
+            fact = action_data.get("fact", "")
+            global_memory.add_fact(fact)
+            history.append({
+                "role": "user",
+                "content": f"Recorded fact to Global Memory: '{fact}'. What is your next move?"
+            })
+            if verbose:
+                print(f"      [Agent Action] RECORD_FACT: '{fact}'")
+        else:
+            history.append({
+                "role": "user",
+                "content": f"Unknown action: '{action_name}'. Please use one of the specified actions."
+            })
+
+    # Force final FINISH on turn limit
+    history.append({"role": "user", "content": "You have reached your turn limit. You MUST now return the final FINISH action JSON immediately."})
+    transcript = ""
+    for msg in history:
+        role = "Assistant" if msg["role"] == "assistant" else "User"
+        transcript += f"{role}: {msg['content']}\n\n"
+    transcript += "Assistant: "
+
+    response = detector_client.complete(transcript, max_tokens=600)
+    try:
+        cleaned = response.strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        if cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+        action_data = json.loads(cleaned)
+        raw_findings = action_data.get("findings", [])
+        if isinstance(raw_findings, list):
+            for f in raw_findings:
                 f["flow_id"] = "general-scan"
             if verbose:
-                print(f"    [*] General scan returned {len(findings)} potential issue(s)")
-            return findings
-    except Exception as e:
-        if verbose:
-            print(f"    [-] General vulnerability scan failed: {e}")
+                print(f"    [*] Agentic general scan returned {len(raw_findings)} confirmed finding(s)")
+            return raw_findings
+    except Exception:
+        pass
 
     return []
 

@@ -234,8 +234,10 @@ def main():
     args = parser.parse_args()
 
     if args.sse:
+        mcp.settings.port = args.port
+        mcp.settings.host = "127.0.0.1"
         print(f"Ultron MCP server starting on SSE http://127.0.0.1:{args.port}", file=sys.stderr)
-        mcp.run(transport="sse", port=args.port)
+        mcp.run(transport="sse")
     else:
         mcp.run(transport="stdio")
 
