@@ -13,7 +13,7 @@ def render_taint_graph(taint_paths, output_path):
         graph_attr={
             "rankdir": "LR",
             "fontsize": "10",
-            "label": "Taint Propagation Graph",
+            "label": "IR Taint Propagation Graph",
             "dpi": "150",
             "bgcolor": "#fafafa",
         },
@@ -36,57 +36,84 @@ def render_taint_graph(taint_paths, output_path):
         s = s.replace('"', "'")
         s = s.replace("\n", " ")
         s = s.replace("\r", "")
-        if len(s) > 80:
-            s = s[:77] + "..."
+        if len(s) > 60:
+            s = s[:57] + "..."
         return s
+
+    def node_type_label(nid):
+        if nid.startswith("ACCESS_"):
+            return "access"
+        elif nid.startswith("ASSIGN_"):
+            return "assign"
+        elif nid.startswith("VAR_"):
+            return "var"
+        elif nid.startswith("CALL_"):
+            return "call"
+        elif nid.startswith("CALLE_"):
+            return "expr"
+        elif nid.startswith("RET_"):
+            return "return"
+        elif nid.startswith("BRANCH_"):
+            return "branch"
+        elif nid.startswith("LIT_"):
+            return "literal"
+        return "node"
 
     added_nodes = set()
     added_edges = set()
 
     for idx, path in enumerate(taint_paths):
-        # 1. Add Source Node
-        src_id = f"src_{idx}_{sanitize(path.source.name)}"
-        src_label = f"SOURCE: {path.source.name}\n{os.path.basename(path.source.file)}:L{path.source.line}"
+        file_label = os.path.basename(path.file_path) if path.file_path else "?"
+
+        src_id = f"src_{idx}_{sanitize(path.source_node_id)}"
+        src_label = f"SOURCE: {path.source_tag}\n{path.source_node_id}\n[{file_label}]"
         d.node(src_id, label=src_label, fillcolor="#ffebee", color="#c62828", fontcolor="#c62828", penwidth="2")
         added_nodes.add(src_id)
 
-        # 2. Add Intermediate Nodes and Edges
-        prev_node_id = src_id
-        for e_idx, edge in enumerate(path.edges):
-            to_node_id = f"var_{idx}_{e_idx}_{sanitize(edge.to_var)}"
-            
-            # Label for intermediate variable node
-            node_label = f"{edge.to_var}\nL{edge.line}"
-            
-            # Determine color
+        prev_id = src_id
+        intermediates = path.path_node_ids[1:] if len(path.path_node_ids) > 1 else []
+
+        for i, nid in enumerate(intermediates):
+            nid_safe = sanitize(nid)
+            node_id = f"mid_{idx}_{i}_{nid_safe}"
+            nt = node_type_label(nid)
+            short_id = nid[:20] + "..." if len(nid) > 23 else nid
+
             fill = "#e3f2fd"
             border = "#1565c0"
-            if path.sanitized and edge.to_var in path.sanitizers:
+            label_extra = ""
+            if nid in path.sanitizer_node_ids:
                 fill = "#e8f5e9"
                 border = "#2e7d32"
-                node_label += "\n[SANITIZED]"
-                
-            d.node(to_node_id, label=node_label, fillcolor=fill, color=border, fontcolor=border)
-            
-            # Edge from previous node to this one
-            edge_key = (prev_node_id, to_node_id)
-            if edge_key not in added_edges:
-                edge_label = f"{edge.edge_type}\n({edge.expression[:30]})"
-                style = "dashed" if edge.edge_type == "arg_pass" else "solid"
-                d.edge(prev_node_id, to_node_id, label=edge_label, color="#757575", style=style)
-                added_edges.add(edge_key)
-                
-            prev_node_id = to_node_id
+                label_extra = "\n[SANITIZED]"
+            elif path.sanitized and nid in path.path_node_ids:
+                pass
 
-        # 3. Add Sink Node
-        sink_id = f"sink_{idx}_{sanitize(path.sink_call)}"
-        sink_label = f"SINK ({path.sink_type})\n{path.sink_call}\nConf: {path.confidence}"
-        d.node(sink_id, label=sink_label, fillcolor="#fff3e0", color="#ef6c00", fontcolor="#ef6c00", penwidth="2")
-        
-        edge_key = (prev_node_id, sink_id)
-        if edge_key not in added_edges:
-            d.edge(prev_node_id, sink_id, label="reaches", color="#ef6c00", penwidth="1.5")
-            added_edges.add(edge_key)
+            d.node(node_id, label=f"{nt}: {short_id}{label_extra}", fillcolor=fill, color=border, fontcolor=border)
+            added_nodes.add(node_id)
+
+            ek = (prev_id, node_id)
+            if ek not in added_edges:
+                prefix = nid.split("_")[0] if "_" in nid else ""
+                edge_label = f"{prefix}"
+                d.edge(prev_id, node_id, label=edge_label, color="#757575")
+                added_edges.add(ek)
+            prev_id = node_id
+
+        sink_id = f"sink_{idx}_{sanitize(path.sink_node_id)}"
+        sink_label = f"SINK: {path.sink_target}\n({path.sink_type})\n{path.sink_node_id}\nConf: {path.confidence}\n[{file_label}]"
+        fill_sink = "#fff3e0"
+        border_sink = "#ef6c00"
+        if path.sanitized:
+            fill_sink = "#e8f5e9"
+            border_sink = "#2e7d32"
+        d.node(sink_id, label=sink_label, fillcolor=fill_sink, color=border_sink, fontcolor=border_sink, penwidth="2")
+        added_nodes.add(sink_id)
+
+        ek = (prev_id, sink_id)
+        if ek not in added_edges:
+            d.edge(prev_id, sink_id, label="reaches", color="#ef6c00", penwidth="1.5")
+            added_edges.add(ek)
 
     out_dir = os.path.dirname(output_path) or "."
     dot_stem = os.path.splitext(os.path.basename(output_path))[0]

@@ -3,154 +3,128 @@ import re
 
 from colors import DIM, WHT, GRN, YLW, RED, RST
 
-def _call_text(c):
-    return c["text"] if isinstance(c, dict) else c
+ROUTE_FILE_PATTERNS = re.compile(r"(/api/|/routes/|route\.(ts|js|tsx)$|/pages/api/)", re.I)
+HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
 
-def _call_line(c):
-    return c.get("line", 0) if isinstance(c, dict) else 0
+AUTH_INDICATORS = {"auth", "jwt", "token", "session", "middleware", "guard", "authenticate", "authorize"}
+VALIDATION_INDICATORS = {"validate", "sanitize", "zod", "joi", "yup", "schema", "check"}
 
-def _resolve_call_target(call_text, known_funcs):
-    call_name = call_text.split("(")[0].strip().split(".")[0].split()[-1] if "(" in call_text else call_text.strip()
-    if not call_name or call_name in ("if", "for", "while", "return", "import", "from", "pass", "def", "class", "const", "let", "var", "function", "new", "try", "catch", "throw", "await", "yield"):
-        return None
 
-    call_lower = call_name.lower().replace("(", "").strip()
-    for fnid, info in known_funcs.items():
-        if info["name"].lower() == call_lower:
-            return fnid
-    return None
+def _is_route_file(fpath: str) -> bool:
+    return bool(ROUTE_FILE_PATTERNS.search(fpath))
 
-def _get_callees(fn_calls, known_funcs):
-    callees = set()
-    for c in fn_calls:
-        target = _resolve_call_target(_call_text(c), known_funcs)
-        if target:
-            callees.add(target)
-    return callees
 
-def build_security_graph(entities, known_funcs, ast_data=None):
-    source_funcs = {}
-    sink_funcs = {}
-    route_funcs = {}
-    validation_funcs = {}
+def _extract_route_path(fpath: str) -> str:
+    m = re.search(r"(?:/api/|/routes/)(.+)", fpath.replace("\\", "/"))
+    if m:
+        route = m.group(1)
+        route = re.sub(r"/route\.(ts|js|tsx)$", "", route)
+        route = re.sub(r"\.(ts|js|tsx)$", "", route)
+        route = re.sub(r"\[(\w+)\]", r":\1", route)
+        return "/" + route
+    return "/" + os.path.splitext(os.path.basename(fpath))[0]
+
+
+def _fnid_for(fpath: str, fn_name: str) -> str:
+    return f"{fpath}::{fn_name}"
+
+
+def build_security_graph_from_ir(ir_modules, call_graph, taint_paths):
+    """Build security_graph dict from IR data.
+
+    Produces the same format expected by rules.py and llm_detector.py:
+    {"flows": [...], "subgraphs": {"auth": ..., "database": ..., "network": ...}, "summary": ...}
+    """
+    sources = {}
+    sinks = {}
+    routes = {}
+    validations = {}
     auth_funcs = {}
 
-    for e in entities:
-        fnid = e.get("fnid", "")
-        if e["type"] == "SOURCE" and fnid:
-            source_funcs.setdefault(fnid, []).append(e)
-        elif e["type"].startswith("SINK_") and fnid:
-            sink_funcs.setdefault(fnid, []).append(e)
-        elif e["type"] == "ROUTE" and fnid:
-            route_funcs[fnid] = e
-        elif e["type"] == "VALIDATION" and fnid:
-            validation_funcs.setdefault(fnid, []).append(e)
-        elif e["type"] in ("AUTH_MIDDLEWARE", "AUTH_CHECK", "JWT_SIGN", "JWT_VERIFY") and fnid:
-            auth_funcs.setdefault(fnid, []).append(e)
+    tag_index = {}
+    for mod in ir_modules:
+        for tag in mod.semantic_tags:
+            tag_index.setdefault(tag.kind, []).append((tag.node_id, mod.file_path))
+        for fn in mod.functions:
+            fp = mod.file_path
+            fnid = _fnid_for(fp, fn.name)
+            if _is_route_file(fp):
+                route_path = _extract_route_path(fp)
+                routes[fnid] = {"label": route_path, "file": fp, "fnid": fnid}
+            name_lower = fn.name.lower()
+            if any(a in name_lower for a in AUTH_INDICATORS):
+                auth_funcs.setdefault(fnid, []).append({"label": fn.name, "file": fp})
+            if any(v in name_lower for v in VALIDATION_INDICATORS):
+                validations.setdefault(fnid, []).append({"label": fn.name, "file": fp})
 
-    call_graph = {}
-    for fnid, info in known_funcs.items():
-        callees = _get_callees(info.get("calls", []), known_funcs)
-        if callees:
-            call_graph[fnid] = callees
+    src_tags = tag_index.get("HTTP_BODY", []) + tag_index.get("HTTP_PARAMS", [])
+    for node_id, fpath in src_tags:
+        label = f"HTTP_BODY({node_id})"
+        fnid = _fnid_for(fpath, label)
+        sources.setdefault(fnid, []).append({"label": label, "file": fpath, "type": "SOURCE", "fnid": fnid})
 
-    # Store taint paths if we use the taint runner
-    build_security_graph.taint_paths = []
+    sink_tag_map = {}
+    for tag_kind in tag_index:
+        if tag_kind.startswith("SINK_"):
+            for node_id, fpath in tag_index[tag_kind]:
+                sink_tag_map[node_id] = (tag_kind, fpath)
 
-    if ast_data:
-        from taint import TaintRunner
-        runner = TaintRunner(ast_data, entities, known_funcs)
-        taint_paths = runner.run()
-        build_security_graph.taint_paths = taint_paths
+    for taint_path in taint_paths:
+        sink_type = taint_path.sink_type or "SINK_UNKNOWN"
+        sink_target = taint_path.sink_target
+        file_path = taint_path.file_path
 
-        flows = []
-        for flow_id, path in enumerate(taint_paths):
-            path_labels = [path.source.name] + [e.to_var for e in path.edges] + [path.sink_call]
-            full_path = [f"{path.source.file}::{path.source.name}"] + [f"{e.file}::{e.to_var}" for e in path.edges]
+        fnid_sink = _fnid_for(file_path, sink_target)
+        sinks.setdefault(fnid_sink, []).append({"label": sink_target, "file": file_path, "type": sink_type, "fnid": fnid_sink})
 
-            flows.append({
-                "id": f"flow-{flow_id}",
-                "source": path.source.name,
-                "source_fnid": f"{path.source.file}::{path.source.name}",
-                "sink": path.sink_call,
-                "sink_fnid": f"{path.source.file}::{path.sink_call}",
-                "sink_type": path.sink_type,
-                "path": full_path,
-                "path_labels": path_labels,
-                "validated": path.sanitized,
-                "validators": path.sanitizers,
-                "expressions": [e.expression for e in path.edges]
-            })
-    else:
-        # Fallback to function-level call-graph traversal
-        def find_flow_paths(source_fnid, visited=None):
-            if visited is None:
-                visited = set()
-            if source_fnid in visited:
-                return []
-            visited.add(source_fnid)
+    call_graph_edges = {}
+    if call_graph:
+        for fn_id in call_graph.all_functions():
+            callees = call_graph.get_callees(fn_id)
+            if callees:
+                call_graph_edges[fn_id] = callees
 
-            paths = []
-            callees = call_graph.get(source_fnid, set())
+    flows = []
+    for flow_id, tp in enumerate(taint_paths):
+        source_fnid = _fnid_for(tp.file_path, tp.source_tag)
+        sink_fnid = _fnid_for(tp.file_path, tp.sink_target)
 
-            for callee in callees:
-                if callee in sink_funcs:
-                    for s in sink_funcs[callee]:
-                        has_val = bool(validation_funcs.get(source_fnid) or validation_funcs.get(callee))
-                        val_labels = []
-                        for vfnid in (source_fnid, callee):
-                            for v in validation_funcs.get(vfnid, []):
-                                val_labels.append(v["label"])
-                        paths.append({
-                            "source_fnid": source_fnid,
-                            "intermediate": [callee] if callee != source_fnid else [],
-                            "sink_fnid": callee,
-                            "sink": s,
-                            "validated": has_val or bool(val_labels),
-                            "validators": val_labels,
-                        })
+        path_labels = [tp.source_tag] + [nid for nid in tp.path_node_ids] + [tp.sink_target]
+        full_path = [source_fnid] + [f"{tp.file_path}::{nid}" for nid in tp.path_node_ids] + [sink_fnid]
 
-                if callee not in visited:
-                    sub_paths = find_flow_paths(callee, visited.copy())
-                    for sp in sub_paths:
-                        sp["intermediate"] = [callee] + sp.get("intermediate", [])
-                        paths.append(sp)
+        flows.append({
+            "id": f"flow-{flow_id}",
+            "source": tp.source_tag,
+            "source_fnid": source_fnid,
+            "sink": tp.sink_target,
+            "sink_fnid": sink_fnid,
+            "sink_type": tp.sink_type or "SINK_UNKNOWN",
+            "path": full_path,
+            "path_labels": path_labels,
+            "validated": tp.sanitized,
+            "validators": tp.sanitizer_node_ids,
+            "expressions": tp.path_node_ids,
+        })
 
-            return paths
+    auth_graph = _build_auth_graph(routes, auth_funcs, {}, call_graph_edges)
+    db_graph = _build_db_graph(flows, {})
+    network_graph = _build_network_graph(sinks, {})
 
-        flows = []
-        flow_id = 0
-        for src_fnid in source_funcs:
-            flow_paths = find_flow_paths(src_fnid)
-            for fp in flow_paths:
-                for se in source_funcs[src_fnid]:
-                    full_path = [src_fnid] + fp.get("intermediate", []) + [fp["sink_fnid"]]
-                    path_labels = []
-                    for pid in full_path:
-                        if pid in known_funcs:
-                            path_labels.append(known_funcs[pid]["name"])
-                        elif pid in route_funcs:
-                            path_labels.append(route_funcs[pid]["label"])
-                        else:
-                            path_labels.append(pid.split("::")[-1])
+    by_sink_type = {}
+    for f in flows:
+        st = f["sink_type"]
+        by_sink_type[st] = by_sink_type.get(st, 0) + 1
 
-                    flows.append({
-                        "id": f"flow-{flow_id}",
-                        "source": se["label"],
-                        "source_fnid": src_fnid,
-                        "sink": fp["sink"]["label"],
-                        "sink_fnid": fp["sink_fnid"],
-                        "sink_type": fp["sink"]["type"],
-                        "path": full_path,
-                        "path_labels": path_labels,
-                        "validated": fp["validated"],
-                        "validators": fp.get("validators", []),
-                    })
-                    flow_id += 1
+    unvalidated = len([f for f in flows if not f["validated"]])
 
-    auth_graph = _build_auth_graph(route_funcs, auth_funcs, known_funcs, call_graph)
-    db_graph = _build_db_graph(flows, known_funcs)
-    network_graph = _build_network_graph(entities, known_funcs, call_graph)
+    summary = {
+        "total_sources": len(sources),
+        "total_sinks": len(sinks),
+        "total_routes": len(routes),
+        "total_flows": len(flows),
+        "unvalidated_flows": unvalidated,
+        "flows_by_sink_type": by_sink_type,
+    }
 
     return {
         "flows": flows,
@@ -159,32 +133,27 @@ def build_security_graph(entities, known_funcs, ast_data=None):
             "database": db_graph,
             "network": network_graph,
         },
-        "summary": _build_summary(flows, route_funcs, auth_funcs, entities),
+        "summary": summary,
     }
+
 
 def _build_auth_graph(route_funcs, auth_funcs, known_funcs, call_graph):
     protected = []
     unprotected = []
-    auth_chain = []
 
     for rfnid, route in route_funcs.items():
         callees = call_graph.get(rfnid, set())
         has_auth = False
-        auth_at = None
+        auth_at = []
         for c in callees:
             if c in auth_funcs:
                 has_auth = True
                 auth_at = auth_funcs[c]
                 break
-
         if has_auth:
             protected.append({
                 "route": route["label"],
                 "route_fnid": rfnid,
-                "auth": [a["label"] for a in (auth_at or [])],
-            })
-            auth_chain.append({
-                "route": route["label"],
                 "auth": [a["label"] for a in (auth_at or [])],
             })
         else:
@@ -197,6 +166,7 @@ def _build_auth_graph(route_funcs, auth_funcs, known_funcs, call_graph):
         "protected_count": len(protected),
         "unprotected_count": len(unprotected),
     }
+
 
 def _build_db_graph(flows, known_funcs):
     db_flows = [f for f in flows if f["sink_type"] in ("SINK_DATABASE", "SINK_SQL")]
@@ -213,45 +183,26 @@ def _build_db_graph(flows, known_funcs):
         }
     return {"operations": list(db_ops.values()), "total": len(db_ops)}
 
-def _build_network_graph(entities, known_funcs, call_graph):
-    net_entities = [e for e in entities if e["type"] == "SINK_NETWORK"]
+
+def _build_network_graph(sinks, known_funcs):
     net_ops = []
-    for e in net_entities:
-        fnid = e.get("fnid", "")
-        fn_name = known_funcs[fnid]["name"] if fnid in known_funcs else "?"
-        net_ops.append({
-            "function": fn_name,
-            "call": e["label"],
-            "file": e["file"],
-            "line": e["line"],
-        })
+    for fnid, entries in sinks.items():
+        for e in entries:
+            if e["type"] == "SINK_NETWORK":
+                net_ops.append({
+                    "function": e["label"],
+                    "call": e["label"],
+                    "file": e["file"],
+                    "line": 0,
+                })
     return {"operations": net_ops, "total": len(net_ops)}
 
-def _build_summary(flows, route_funcs, auth_funcs, entities):
-    by_sink = {}
-    for f in flows:
-        st = f["sink_type"]
-        by_sink[st] = by_sink.get(st, 0) + 1
-
-    total_sources = len([e for e in entities if e["type"] == "SOURCE"])
-    total_sinks = len([e for e in entities if e["type"].startswith("SINK_")])
-    total_routes = len(route_funcs)
-    unvalidated = len([f for f in flows if not f["validated"]])
-
-    return {
-        "total_sources": total_sources,
-        "total_sinks": total_sinks,
-        "total_routes": total_routes,
-        "total_flows": len(flows),
-        "unvalidated_flows": unvalidated,
-        "flows_by_sink_type": by_sink,
-    }
 
 def show_security_graph_summary(sg):
     s = sg["summary"]
     print(f"  {DIM}[*]{RST} security graph:")
-    print(f"    {GRN}•{RST} {s['total_sources']} sources, {s['total_sinks']} sinks, {s['total_routes']} routes")
-    print(f"    {GRN}•{RST} {s['total_flows']} data-flow paths ({s['unvalidated_flows']} unvalidated)")
+    print(f"    {GRN}*{RST} {s['total_sources']} sources, {s['total_sinks']} sinks, {s['total_routes']} routes")
+    print(f"    {GRN}*{RST} {s['total_flows']} data-flow paths ({s['unvalidated_flows']} unvalidated)")
     if s.get("flows_by_sink_type"):
         parts = [f"{GRN}{k.replace('SINK_','').lower()}{RST}={v}" for k, v in sorted(s["flows_by_sink_type"].items())]
         print(f"    {DIM}[*]{RST} flows by sink: {', '.join(parts)}")

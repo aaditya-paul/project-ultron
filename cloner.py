@@ -71,7 +71,10 @@ def clone_repo(repo_url):
 
     if repo_exists(repo_name):
         print(f"  {DIM}[*] {WHT}{repo_name}{RST} {DIM}already exists locally.{RST}")
-        answer = input(f"  {CYAN}[~]{RST} pull latest changes and continue? [{GRN}Y{RST}/{RED}n{RST}] ").strip().lower()
+        try:
+            answer = input(f"  {CYAN}[~]{RST} pull latest changes and continue? [{GRN}Y{RST}/{RED}n{RST}] ").strip().lower()
+        except EOFError:
+            answer = "y"
         if answer in ("", "y", "yes"):
             if pull_repo(target_dir):
                 return repo_name
@@ -120,7 +123,10 @@ def delete_repo(repo_name):
         print(f"  {RED}[-]{RST} {WHT}{repo_name}{RST} not found.")
         return False
 
-    answer = input(f"  {CYAN}[~]{RST} delete {WHT}{repo_name}{RST}? [{GRN}y{RST}/{RED}N{RST}] ").strip().lower()
+    try:
+        answer = input(f"  {CYAN}[~]{RST} delete {WHT}{repo_name}{RST}? [{GRN}y{RST}/{RED}N{RST}] ").strip().lower()
+    except EOFError:
+        answer = "n"
     if answer not in ("y", "yes"):
         print(f"  {DIM}[*]{RST} skipped.")
         return False
@@ -143,7 +149,10 @@ def delete_all_repos():
     print(f"  {RED}{BOLD}WARNING:{RST} this will delete {len(repos)} repositories:")
     for r in repos:
         print(f"    {RED}•{RST} {WHT}{r}{RST}")
-    answer = input(f"  {CYAN}[~]{RST} proceed? [{GRN}y{RST}/{RED}N{RST}] ").strip().lower()
+    try:
+        answer = input(f"  {CYAN}[~]{RST} proceed? [{GRN}y{RST}/{RED}N{RST}] ").strip().lower()
+    except EOFError:
+        answer = "n"
     if answer not in ("y", "yes"):
         print(f"  {DIM}[*]{RST} cancelled.")
         return

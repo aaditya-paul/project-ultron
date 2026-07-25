@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from ir import (
     IRModule, IRFunction, IRCall, IRVar, IRAccess, IRLiteral,
-    IRAssign, IRBranch, IRReturn, IRCallExpr, Edge, Tag,
+    IRAssign, IRBranch, IRReturn, IRCallExpr, Edge, Tag, CallResolution,
 )
 
 
@@ -394,6 +394,257 @@ class TestEdgeCases(unittest.TestCase):
         self.assertEqual(len(mod2.provenance_edges), 1)
         self.assertEqual(mod2.provenance_edges[0].source_id, acc.id)
         self.assertEqual(mod2.provenance_edges[0].target_id, assign.id)
+
+
+class TestCallResolution(unittest.TestCase):
+
+    def test_call_resolution_defaults(self):
+        cr = CallResolution(call_id="CALL_abc", resolved_fn_id="FUNC_def")
+        self.assertEqual(cr.call_id, "CALL_abc")
+        self.assertEqual(cr.resolved_fn_id, "FUNC_def")
+        self.assertEqual(cr.candidates, [])
+        self.assertEqual(cr.confidence, 1.0)
+        self.assertIsNone(cr.receiver_type)
+
+    def test_call_resolution_full(self):
+        cr = CallResolution(
+            call_id="CALL_abc",
+            resolved_fn_id="FUNC_def",
+            candidates=["FUNC_def", "FUNC_ghi"],
+            confidence=0.85,
+            receiver_type="PRISMA_CLIENT",
+        )
+        self.assertEqual(len(cr.candidates), 2)
+        self.assertEqual(cr.confidence, 0.85)
+        self.assertEqual(cr.receiver_type, "PRISMA_CLIENT")
+
+    def test_call_resolution_no_match(self):
+        cr = CallResolution(call_id="CALL_abc", resolved_fn_id=None, candidates=[])
+        self.assertIsNone(cr.resolved_fn_id)
+        self.assertEqual(cr.candidates, [])
+
+    def test_call_resolution_round_trip(self):
+        cr = CallResolution(
+            call_id="CALL_abc123",
+            resolved_fn_id="FUNC_def456",
+            candidates=["FUNC_def456", "FUNC_ghi789"],
+            confidence=0.9,
+            receiver_type="EXPRESS_REQUEST",
+        )
+        cr2 = CallResolution.from_dict(cr.to_dict())
+        self.assertEqual(cr.call_id, cr2.call_id)
+        self.assertEqual(cr.resolved_fn_id, cr2.resolved_fn_id)
+        self.assertEqual(cr.candidates, cr2.candidates)
+        self.assertEqual(cr.confidence, cr2.confidence)
+        self.assertEqual(cr.receiver_type, cr2.receiver_type)
+
+
+class TestIRModuleCallResolution(unittest.TestCase):
+
+    def setUp(self):
+        self.mod = IRModule(file_path="test.ts", language="TypeScript", functions=[])
+
+    def test_add_resolution(self):
+        self.mod.add_resolution(
+            call_id="CALL_abc",
+            resolved_fn_id="FUNC_def",
+            candidates=["FUNC_def"],
+            confidence=1.0,
+        )
+        self.assertEqual(len(self.mod.call_resolutions), 1)
+        cr = self.mod.call_resolutions[0]
+        self.assertEqual(cr.call_id, "CALL_abc")
+        self.assertEqual(cr.resolved_fn_id, "FUNC_def")
+
+    def test_add_resolution_without_fn_id(self):
+        self.mod.add_resolution(call_id="CALL_abc")
+        self.assertEqual(len(self.mod.call_resolutions), 1)
+        self.assertIsNone(self.mod.call_resolutions[0].resolved_fn_id)
+
+    def test_resolutions_in_json_round_trip(self):
+        self.mod.add_resolution(
+            call_id="CALL_abc",
+            resolved_fn_id="FUNC_def",
+            candidates=["FUNC_def"],
+            confidence=0.95,
+            receiver_type="PRISMA_CLIENT",
+        )
+        self.mod.add_resolution(call_id="CALL_unresolved")
+        mod2 = IRModule.from_json(self.mod.to_json())
+        self.assertEqual(len(mod2.call_resolutions), 2)
+        self.assertEqual(mod2.call_resolutions[0].resolved_fn_id, "FUNC_def")
+        self.assertEqual(mod2.call_resolutions[0].confidence, 0.95)
+        self.assertEqual(mod2.call_resolutions[0].receiver_type, "PRISMA_CLIENT")
+        self.assertIsNone(mod2.call_resolutions[1].resolved_fn_id)
+
+    def test_empty_resolutions_in_json(self):
+        mod2 = IRModule.from_json(self.mod.to_json())
+        self.assertEqual(len(mod2.call_resolutions), 0)
+
+    def test_resolutions_with_functions_round_trip(self):
+        fn = IRFunction(name="handler", params=[], file_path="test.ts", body=[])
+        self.mod.functions.append(fn)
+        self.mod.add_resolution(call_id="CALL_abc", resolved_fn_id=fn.id)
+        mod2 = IRModule.from_json(self.mod.to_json())
+        self.assertEqual(len(mod2.functions), 1)
+        self.assertEqual(len(mod2.call_resolutions), 1)
+        self.assertEqual(mod2.functions[0].id, fn.id)
+
+
+class TestProvenanceBuilder(unittest.TestCase):
+
+    def test_provenance_from_assign(self):
+        from extractors.js_ts import JsTsExtractor
+        source = """
+function test() {
+  const x = y;
+}
+"""
+        mod = JsTsExtractor().extract(source, "test.ts", "TypeScript")
+        self.assertGreater(len(mod.provenance_edges), 0)
+        # Should have an edge from VAR_y to ASSIGN_x
+        edge = mod.provenance_edges[0]
+        self.assertEqual(edge.transform, "assign")
+
+    def test_provenance_from_call_assign(self):
+        from extractors.js_ts import JsTsExtractor
+        source = """
+function test() {
+  const result = getData();
+}
+"""
+        mod = JsTsExtractor().extract(source, "test.ts", "TypeScript")
+        edges = mod.provenance_edges
+        # Should have edges: from VAR/arg to call, from call to assign
+        self.assertGreater(len(edges), 0)
+
+    def test_provenance_from_return(self):
+        from extractors.js_ts import JsTsExtractor
+        source = """
+function test() {
+  return x;
+}
+"""
+        mod = JsTsExtractor().extract(source, "test.ts", "TypeScript")
+        edges = mod.provenance_edges
+        return_edges = [e for e in edges if e.transform == "return"]
+        self.assertEqual(len(return_edges), 1)
+        self.assertEqual(return_edges[0].transform, "return")
+
+    def test_provenance_in_branch(self):
+        from extractors.js_ts import JsTsExtractor
+        source = """
+function test(x) {
+  if (x > 0) {
+    const y = x;
+  }
+}
+"""
+        mod = JsTsExtractor().extract(source, "test.ts", "TypeScript")
+        edges = mod.provenance_edges
+        # The assign inside branch should have conditions set
+        assign_edges = [e for e in edges if e.transform == "assign"]
+        self.assertGreater(len(assign_edges), 0)
+        # Should have conditions since assign is inside branch
+        self.assertIsNotNone(assign_edges[-1].conditions)
+
+    def test_provenance_no_edges_for_literal(self):
+        from extractors.js_ts import JsTsExtractor
+        source = """
+function test() {
+  const x = 42;
+}
+"""
+        mod = JsTsExtractor().extract(source, "test.ts", "TypeScript")
+        # Literal assignment should not create edges (no variable sources)
+        var_edges = [e for e in mod.provenance_edges if e.source_id.startswith("VAR_")]
+        self.assertEqual(len(var_edges), 0)
+
+
+class TestSymbolResolver(unittest.TestCase):
+
+    def test_resolve_same_module(self):
+        from extractors.resolver import SymbolResolver
+        fn = IRFunction(
+            name="getUser",
+            params=["id"],
+            file_path="test.ts",
+            body=[
+                IRCall(target="helper", args=[IRVar("id")], result_var="result"),
+                IRReturn(value=IRVar("result")),
+            ],
+        )
+        helper = IRFunction(
+            name="helper",
+            params=["x"],
+            file_path="test.ts",
+            body=[IRReturn(value=IRLiteral(42, "number"))],
+        )
+        mod = IRModule(file_path="test.ts", language="TypeScript", functions=[fn, helper])
+        resolver = SymbolResolver([mod])
+        resolver.resolve_all()
+        self.assertEqual(len(mod.call_resolutions), 1)
+        cr = mod.call_resolutions[0]
+        self.assertEqual(cr.resolved_fn_id, helper.id)
+
+    def test_resolve_cross_module(self):
+        from extractors.resolver import SymbolResolver
+        fn1 = IRFunction(
+            name="helper",
+            params=["x"],
+            file_path="src/helpers.ts",
+            body=[IRReturn(value=IRVar("x"))],
+        )
+        mod1 = IRModule(file_path="src/helpers.ts", language="TypeScript", functions=[fn1])
+        fn2 = IRFunction(
+            name="handler",
+            params=["id"],
+            file_path="src/main.ts",
+            body=[IRCall(target="helper", args=[IRVar("id")])],
+        )
+        mod2 = IRModule(file_path="src/main.ts", language="TypeScript", functions=[fn2])
+        resolver = SymbolResolver([mod1, mod2])
+        resolver.resolve_all()
+        self.assertEqual(len(mod2.call_resolutions), 1)
+        cr = mod2.call_resolutions[0]
+        self.assertEqual(cr.resolved_fn_id, fn1.id)
+        self.assertEqual(cr.confidence, 1.0)
+
+    def test_resolve_nonexistent_returns_no_match(self):
+        from extractors.resolver import SymbolResolver
+        fn = IRFunction(
+            name="handler",
+            params=["id"],
+            file_path="test.ts",
+            body=[IRCall(target="doesNotExist", args=[IRVar("id")])],
+        )
+        mod = IRModule(file_path="test.ts", language="TypeScript", functions=[fn])
+        resolver = SymbolResolver([mod])
+        resolver.resolve_all()
+        self.assertEqual(len(mod.call_resolutions), 0)
+
+    def test_resolve_inline_call_expr(self):
+        from extractors.resolver import SymbolResolver
+        fn1 = IRFunction(
+            name="helper",
+            params=["x"],
+            file_path="test.ts",
+            body=[IRReturn(value=IRVar("x"))],
+        )
+        fn2 = IRFunction(
+            name="handler",
+            params=["id"],
+            file_path="test.ts",
+            body=[
+                IRAssign(target="result", value=IRCallExpr(target="helper", args=[IRVar("id")])),
+            ],
+        )
+        mod = IRModule(file_path="test.ts", language="TypeScript", functions=[fn1, fn2])
+        resolver = SymbolResolver([mod])
+        resolver.resolve_all()
+        self.assertEqual(len(mod.call_resolutions), 1)
+        cr = mod.call_resolutions[0]
+        self.assertEqual(cr.resolved_fn_id, fn1.id)
 
 
 if __name__ == "__main__":
