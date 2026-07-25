@@ -49,7 +49,9 @@ python ultron.py --help
 | `help` | show usage info |
 | `exit` / `quit` / `bye` | exit the program |
 
-If a repository already exists locally, you'll be prompted to pull latest changes instead of re-cloning. On clone failure, the program re-prompts instead of crashing.
+If a repository already exists locally, you'll be prompted to pull latest changes instead of re-cloning.
+
+The program **never exits on errors** — clone failures, invalid commands, missing args all just loop back to the prompt. Only `exit`/`quit`/`bye` terminates the session. After any CLI command (including successful clones), the program drops into interactive mode.
 
 ---
 
