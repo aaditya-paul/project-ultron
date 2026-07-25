@@ -4,6 +4,42 @@ A multi-agent system that finds security flaws in source code repositories by co
 
 ---
 
+## Current Status
+
+**Phase: MVP scaffolding** — the repository cloner is implemented. The full pipeline (AST, taint, agents, viz, report) is designed and coming next.
+
+```
+[GitHub URL]  →  [1. Clone]  →  (AST · Flow · Taint · Agents · Viz · Report)
+                   ▲ done        ▲ planned (in order)
+```
+
+---
+
+## Usage
+
+```bash
+# Run interactively
+python ultron.py
+# → then enter a repo URL at the prompt
+
+# Pass URL directly
+python ultron.py https://github.com/user/repo
+
+# Show help
+python ultron.py --help
+```
+
+**Interactive commands:**
+| Input | Action |
+|---|---|
+| `<repository-url>` | clone the target |
+| `help` | show usage info |
+| `exit` / `quit` / `bye` | exit the program |
+
+On clone failure, the program re-prompts instead of crashing — try a different URL or type `exit`.
+
+---
+
 ## Goal
 
 **Automatically identify security vulnerabilities in a GitHub repository and produce a structured, visual, evidence-backed report — fully locally, with no code leaving the machine.**
@@ -27,34 +63,21 @@ A multi-agent system that finds security flaws in source code repositories by co
 [GitHub URL]
      │
      ▼
-[1. Clone]  ── git clone via native terminal into a sandboxed workdir
+[1. Clone]  ── git clone via subprocess into clones/       ✅ MVP done
      │
      ▼
-[2. AST Analysis]  ── Parse every supported source file (JS/TS, Python, Go, Java…)
-     │                  Extract functions, their signatures, and call relationships
+[2. AST Analysis]  ── Parse every supported source file    🔲 planned
+     │                  (JS/TS, Python, Go, Java…)
      ▼
-[3. Flow Graph]  ── Cluster functions into logical flows (auth, db, API, etc.)
-     │                Each node = function with file:line, params, calls, sinks
+[3. Flow Graph]  ── Cluster functions into logical flows   🔲 planned
      ▼
-[4. Taint Graph]  ── Track user input → sanitizers → sinks
-     │                 Build per-flow data-flow chains, e.g.:
-     │                   User Input → req.body.email → validateUser()
-     │                   → buildQuery() → database.execute()
+[4. Taint Graph]  ── Track user input → sanitizers → sinks 🔲 planned
      ▼
-[5. Security Agents]  ── One agent per vulnerability class walks the taint graph
-     │                    and the source of each relevant function:
-     │                      • SQL Injection Agent
-     │                      • Auth Agent  (JWT, session, RBAC)
-     │                      • XSS Agent
-     │                      • SSRF Agent
-     │                      • Secrets Agent  (hardcoded keys, tokens)
-     │                      • Business Logic Agent  (IDOR, race, logic flaws)
+[5. Security Agents]  ── 6 specialized agents              🔲 planned
      ▼
-[6. Visualization]  ── Live, per-agent view of the function/taint path under test
-     │                  (peace-of-mind UI showing what the agent is reasoning on)
+[6. Visualization]  ── Live per-agent view                 🔲 planned
      ▼
-[7. Report]  ── Aggregated findings: severity, file:line, taint path, evidence,
-                remediation. Exportable as JSON + Markdown.
+[7. Report]  ── Aggregated findings + remediation          🔲 planned
 ```
 
 ### Visual Representation (Per-Agent Peace-of-Mind View)
@@ -73,23 +96,14 @@ This makes the black-box LLM auditable, not magical.
 
 ```
 ultron/
-├── cli/                  # Entry point: takes GitHub URL, orchestrates pipeline
-├── cloner/               # Spawns native terminal, runs git clone safely
-├── analyzer/
-│   ├── ast/              # Language-specific parsers → IR
-│   ├── flow/             # Builds call graph + clusters into flows
-│   └── taint/            # Taint propagation engine
-├── agents/               # One module per vulnerability class
-│   ├── sqli.py
-│   ├── auth.py
-│   ├── xss.py
-│   ├── ssrf.py
-│   ├── secrets.py
-│   └── logic.py
-├── llm/                  # Local 8B model runner (qwen3.5 / gemma4 via llama.cpp / ollama)
-├── viz/                  # Web UI for live agent trace
-├── reporter/             # Aggregates findings → JSON + Markdown
-└── benchmarks/           # Curated vulnerable repos for measuring FP/FN
+├── ultron.py             # Entry point (CLI + interactive loop)
+├── colors.py             # ANSI color constants + console setup
+├── banner.py             # ULTRON ASCII art + banner()
+├── cloner.py             # git clone logic
+├── help.py               # help text display
+├── clones/               # Cloned repositories land here
+├── README.md
+└── .gitignore
 ```
 
 ### LLM Strategy
@@ -103,21 +117,27 @@ ultron/
 
 ## Tech Stack (Proposed)
 
-| Layer | Choice | Why |
-|---|---|---|
-| Language | Python | Best ecosystem for AST, static analysis, LLM glue |
-| AST | `tree-sitter` (multi-language) | Fast, robust, language-agnostic IR |
-| LLM runtime | Ollama / llama.cpp | Local, easy model swap |
-| Viz | React + D3 / Cytoscape.js | Graph rendering for flow + taint |
-| CLI | Typer / Rich | Clean terminal UX |
-| Report | Markdown + JSON | Human + machine consumable |
+| Layer | Current | Planned |
+|---|---|---|---|
+| Language | Python 3 (stdlib) | — |
+| CLI | `argparse` (manual) | Typer / Rich |
+| Git | `subprocess` → `git clone` | — |
+| AST | — | `tree-sitter` (multi-language) |
+| LLM runtime | — | Ollama / llama.cpp |
+| Viz | — | React + D3 / Cytoscape.js |
+| Report | — | Markdown + JSON |
 
 ---
 
 ## MVP Scope
 
-**In scope:**
-- GitHub URL → clone
+**Phase 1 — Clone (current):**
+- GitHub URL → clone via `git clone`
+- Interactive CLI with retry on failure
+- `--help` flag + inline help command
+- `exit`/`quit`/`bye` commands
+
+**Phase 2 — Analysis (planned):**
 - AST analysis for **at least 2 languages** (start with Python + JS/TS)
 - Call graph + flow clustering
 - Taint graph for input → sink
@@ -151,18 +171,18 @@ ultron/
 
 ---
 
-## Getting Started (planned)
+## Getting Started
 
 ```bash
-# Install
+# Clone
 git clone https://github.com/<you>/ultron
 cd ultron
-pip install -e .
 
-# Run (local model must be pulled, e.g. via ollama)
-ollama pull qwen2.5:7b
-ultron analyze https://github.com/<owner>/<repo>
+# Run
+python ultron.py https://github.com/<owner>/<repo>
 ```
+
+No dependencies — pure Python 3 + system `git`.
 
 ---
 
