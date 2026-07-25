@@ -7,44 +7,65 @@ data-flow paths from sources to sinks, with inter-procedural propagation
 and sanitizer (VALIDATION_GATE) awareness.
 """
 
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 import fnmatch
 
-from ir import IRModule, IRFunction, IRCall, IRAssign, IRBranch, IRReturn, IRCallExpr, IRAccess, Edge, Tag
+from ir import IRModule, IRFunction, IRCall, IRAssign, IRBranch, IRReturn, IRCallExpr, IRAccess, IRVar, Edge, Tag
 from extractors.call_graph import CallGraph
 
 
 # ── Sink patterns (mirrors classifier.py) ────────────────────────────────────
 
+# ── Sink patterns (mirrors classifier.py) ────────────────────────────────────
+
 SINK_DB_PATTERNS = {
-    "*db.*", "*query*", "*prisma*", "*knex*", "*mongoose*", "*sequelize*",
-    "*repository*", "*model*", "*orm*", "*$transaction*", "*$execute*", "*$queryrawunsafe*", "*sql.raw*",
-    "*.findunique*", "*.findmany*", "*.findfirst*", "*.findone*",
-    "*.create*", "*.createmany*", "*.update*", "*.updatemany*",
-    "*.delete*", "*.deletemany*", "*.upsert*", "*.raw*", "*.executesql*",
-    "*.insert*", "*.save*", "*.select*", "*$where*", "*mapreduce*",
+    "*db.query*", "*db.raw*", "*db.execute*", "*db.executesql*",
+    "*prisma*", "*knex*", "*mongoose*", "*sequelize*",
+    "*$transaction*", "*$execute*", "*$queryrawunsafe*", "*sql.raw*",
+    "*.findunique*", "*.findmany*", "*.findfirst*", "*.findone*", "*.findbyid*", "*.findbypk*",
+    "*.createmany*", "*.updatemany*", "*.deletemany*", "*.upsert*", "*.executesql*",
+    "*.insert*", "*$where*", "*mapreduce*", "queryresulttojson",
+    "db.query", "db.execute", "db.insert", "db.update", "db.delete",
 }
 
-JS_STD_EXCLUSIONS = {
+EXCLUDED_METHOD_NAMES = {
+    # JS/TS Built-ins & Arrays/Objects
     "find", "filter", "map", "foreach", "reduce", "some", "every",
     "includes", "indexof", "create", "assign", "keys", "values",
-    "parse", "stringify", "slice", "splice", "push", "pop", "shift", "unshift"
+    "parse", "stringify", "slice", "splice", "push", "pop", "shift", "unshift",
+    "split", "join", "format", "replace", "concat", "match", "substring", "trim",
+    
+    # WebGL / 3D Math / Graphics / Vector & Matrix ops
+    "normalize", "sub", "transform", "settransform", "uniform1f", "uniform1i",
+    "uniform2f", "uniform3f", "uniform4f", "uniform1fv", "uniform2fv", "uniform3fv",
+    "uniform4fv", "uniform1iv", "uniform3iv", "uniformmatrix3fv", "uniformmatrix4fv",
+    "computemorphnormals", "getnormalmatrix", "bufferguessnormaltype",
+    "refreshuniformsfog", "refreshuniformslights", "refreshuniformscommon",
+    "refreshuniformsline", "refreshuniformsdash", "refreshuniformsparticle",
+    "refreshuniformsphong", "refreshuniformslambert", "refreshuniformsshadow",
+    "loaduniformsgeneric", "loaduniformsmatrices",
+    
+    # DOM / UI Methods & Components
+    "queryselector", "queryselectorall", "getelementbyid", "getelementsbyclassname",
+    "getelementsbytagname", "fromqueryparams", "geterrormessage", "streamtext",
+    "checkifllmmodelavailable", "buildsystemprompt",
 }
 
 SINK_SHELL_PATTERNS = {
-    "*exec*", "*spawn*", "*child_process*", "*shell*", "*system*", "*popen*", "*execsync*", "*eval*"
+    "*child_process*", "*execsync*", "*execfile*", "*popen*", "*system*", "eval", "spawn", "exec"
 }
 
 SINK_FILE_PATTERNS = {
-    "*readfile*", "*writefile*", "*openfile*", "*unlink*", "*readdir*", "*fs.*", "*file.*", "*stream*",
-    "*sendfile*", "*download*", "*createreadstream*"
+    "*readfile*", "*writefile*", "*openfile*", "*unlink*", "*readdir*", "*fs.*",
+    "*sendfile*", "*download*", "*createreadstream*", "*createwritestream*"
 }
 
 SINK_NETWORK_PATTERNS = {
-    "*fetch*", "*axios*", "*request*", "*ajax*", "*http.*", "*https.*", "*got*", "*superagent*",
-    "*undici*", "*redirect*", "*permanentredirect*"
+    "*fetch*", "*axios*", "*ajax*", "*http.*", "*https.*", "*got*", "*superagent*",
+    "*undici*"
 }
 
 SINK_XSS_PATTERNS = {
@@ -73,13 +94,28 @@ def matches_any_glob(text: str, patterns: set) -> bool:
     return False
 
 
+def is_non_runtime_file(file_path: str) -> bool:
+    if not file_path:
+        return False
+    fp = file_path.replace("\\", "/").lower()
+    fn = os.path.basename(fp)
+    if any(p in fp for p in ("/cypress/", "/test/", "/tests/", "/__tests__/", "/spec/", "/specs/", "/assets/private/", "/node_modules/", "/vendor/", "/dist/", "/codefixes/", "/data/static/", "/static/codefixes/")):
+        return True
+    if any(fn.endswith(ext) for ext in (".spec.ts", ".spec.js", ".test.ts", ".test.js", ".min.js", ".bundle.js")):
+        return True
+    if fn in ("gruntfile.js", "gulpfile.js", "cypress.config.ts", "cypress.config.js", "jest.config.js", "webpack.config.js", "vite.config.ts"):
+        return True
+    return False
+
+
 def detect_sink_type(call_target: str) -> Optional[tuple[str, float]]:
     """Check if a call target matches any known sink pattern."""
     target_lower = call_target.lower().strip()
     parts = target_lower.split(".")
+    method_name = parts[-1]
 
-    # Guard against standard JS object/array helper methods (e.g. Object.create, arr.find)
-    if parts[-1] in JS_STD_EXCLUSIONS and parts[0] not in ("db", "prisma", "knex", "repo", "repository", "model", "orm"):
+    # Exclude non-sink methods unless explicitly called on DB/ORM targets
+    if method_name in EXCLUDED_METHOD_NAMES and parts[0] not in ("db", "prisma", "knex", "repo", "repository", "sequelize", "mongoose"):
         return None
 
     if matches_any_glob(call_target, SINK_SHELL_PATTERNS):
@@ -110,6 +146,16 @@ class TaintPath:
     operation_tags: list[str] = field(default_factory=list)  # OP_COERCION, OP_VALIDATION, OP_AUTH
     confidence: float = 1.0
     sink_type: str = "SINK_UNKNOWN"
+
+
+def expr_to_text(expr) -> str:
+    if isinstance(expr, IRVar):
+        return expr.name
+    elif isinstance(expr, IRAccess):
+        parts = [expr_to_text(expr.root)]
+        parts.extend(str(p) if isinstance(p, str) else expr_to_text(p) for p in expr.path)
+        return ".".join(parts)
+    return ""
 
 
 # ── Taint engine ─────────────────────────────────────────────────────────────
@@ -219,6 +265,8 @@ class TaintEngine:
         """
         sinks = []
         for mod in self.modules:
+            if is_non_runtime_file(mod.file_path):
+                continue
             for fn in mod.functions:
                 self._collect_stmt_sinks(fn.body, mod.file_path, sinks)
         seen: set[tuple[str, str]] = set()
@@ -231,11 +279,14 @@ class TaintEngine:
         return deduped
 
     def _collect_stmt_sinks(self, stmts: list, file_path: str, acc: list):
+        if is_non_runtime_file(file_path):
+            return
         for stmt in stmts:
             if isinstance(stmt, IRCall):
-                result = detect_sink_type(stmt.target)
+                target_str = f"{expr_to_text(stmt.receiver)}.{stmt.target}" if stmt.receiver else stmt.target
+                result = detect_sink_type(target_str)
                 if result:
-                    acc.append((stmt.id, stmt.target, result[0], file_path))
+                    acc.append((stmt.id, target_str, result[0], file_path))
                 for arg in stmt.args:
                     self._collect_expr_sinks(arg, acc, file_path)
                 if stmt.receiver:
@@ -250,10 +301,13 @@ class TaintEngine:
                     self._collect_expr_sinks(stmt.value, acc, file_path)
 
     def _collect_expr_sinks(self, expr, acc: list, file_path: str):
+        if is_non_runtime_file(file_path):
+            return
         if isinstance(expr, IRCallExpr):
-            result = detect_sink_type(expr.target)
+            target_str = f"{expr_to_text(expr.receiver)}.{expr.target}" if expr.receiver else expr.target
+            result = detect_sink_type(target_str)
             if result:
-                acc.append((expr.id, expr.target, result[0], file_path))
+                acc.append((expr.id, target_str, result[0], file_path))
             for arg in expr.args:
                 self._collect_expr_sinks(arg, acc, file_path)
             if expr.receiver:
@@ -275,6 +329,8 @@ class TaintEngine:
 
         Returns list of (source_node_id, path_node_ids, sanitized, sanitizer_ids, operation_tags).
         """
+        if is_non_runtime_file(file_path):
+            return []
         memo_key = (start_node_id, file_path)
         if visited is None:
             visited = set()

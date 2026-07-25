@@ -8,8 +8,10 @@ Takes all IRModules from a project and:
   4. Populates call_resolutions on each module
 """
 
+import os
 from typing import Optional
 from ir import IRModule, IRFunction, IRCall, IRAssign, IRBranch, IRReturn, IRCallExpr, IRVar, IRAccess
+from parser import classify_file_role
 
 
 class SymbolTable:
@@ -18,6 +20,8 @@ class SymbolTable:
     def __init__(self):
         # name.lower() → list of (file_path, function_id)
         self.functions: dict[str, list[tuple[str, str]]] = {}
+        # file_path → { local_name.lower() → function_id }
+        self.file_functions: dict[str, dict[str, str]] = {}
         # file_path → { local_name → (source_module, exported_name) }
         self.imports: dict[str, dict[str, tuple[str, str]]] = {}
         # Known framework type patterns
@@ -41,37 +45,70 @@ class SymbolTable:
         """Index all functions and imports across modules."""
         for mod in modules:
             fp = mod.file_path.replace("\\", "/")
+            mod_fn_map = self.file_functions.setdefault(fp, {})
             for fn in mod.functions:
                 key = fn.name.lower()
-                self.functions.setdefault(key, []).append((fp, fn.id))
+                if key:
+                    self.functions.setdefault(key, []).append((fp, fn.id))
+                    mod_fn_map[key] = fn.id
 
     def resolve_call(self, call: IRCall, mod: IRModule) -> tuple[Optional[str], list[str], float]:
-        """Resolve an IRCall to its most likely target."""
-        target = call.target.lower()
+        """Resolve an IRCall using a strict 4-tier scope hierarchy."""
+        target = call.target.lower().strip()
+        if not target:
+            return None, [], 0.0
 
-        # 1. Exact match in global index
-        candidates = self.functions.get(target, [])
-        if candidates:
-            best = candidates[0][1]
-            return best, [c[1] for c in candidates], 1.0
+        mod_path = mod.file_path.replace("\\", "/")
 
-        # 2. Try with receiver type hint
+        # 1. Local function in the same file module
+        local_fns = self.file_functions.get(mod_path, {})
+        if target in local_fns:
+            fn_id = local_fns[target]
+            return fn_id, [fn_id], 1.0
+
+        # 2. Check imported functions in this module
+        mod_imports = self.imports.get(mod_path, {})
+        if target in mod_imports:
+            src_mod, exported = mod_imports[target]
+            src_path = src_mod.replace("\\", "/")
+            src_fns = self.file_functions.get(src_path, {})
+            exp_key = exported.lower()
+            if exp_key in src_fns:
+                fn_id = src_fns[exp_key]
+                return fn_id, [fn_id], 0.95
+
+        # 3. Receiver type inference
         if call.receiver:
             rtype = self._resolve_receiver_type(call.receiver, mod)
             if rtype:
-                qualified = f"{rtype}.{target}"
-                qualified_fns = self.functions.get(qualified.lower(), [])
+                qualified = f"{rtype}.{target}".lower()
+                qualified_fns = self.functions.get(qualified, [])
                 if qualified_fns:
                     best = qualified_fns[0][1]
-                    return best, [c[1] for c in qualified_fns], 0.9
+                    return best, [c[1] for c in qualified_fns], 0.90
 
-            # 3. Try as module.function
             receiver_text = self._expr_to_text(call.receiver)
-            qualified = f"{receiver_text}.{call.target}"
-            qualified_fns = self.functions.get(qualified.lower(), [])
-            if qualified_fns:
-                best = qualified_fns[0][1]
-                return best, [c[1] for c in qualified_fns], 0.85
+            if receiver_text:
+                qualified = f"{receiver_text}.{call.target}".lower()
+                qualified_fns = self.functions.get(qualified, [])
+                if qualified_fns:
+                    best = qualified_fns[0][1]
+                    return best, [c[1] for c in qualified_fns], 0.85
+
+        # 4. Fallback to global match filtered by same directory and matching file role
+        candidates = self.functions.get(target, [])
+        if candidates:
+            caller_dir = os.path.dirname(mod_path)
+            same_dir_candidates = [c for c in candidates if os.path.dirname(c[0]) == caller_dir]
+            if same_dir_candidates:
+                best = same_dir_candidates[0][1]
+                return best, [c[1] for c in same_dir_candidates], 1.0
+
+            caller_role = classify_file_role(mod_path)
+            matching_role_candidates = [c for c in candidates if classify_file_role(c[0]) == caller_role]
+            if matching_role_candidates:
+                best = matching_role_candidates[0][1]
+                return best, [c[1] for c in matching_role_candidates], 0.70
 
         return None, [], 0.0
 

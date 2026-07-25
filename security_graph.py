@@ -401,6 +401,9 @@ def _build_network_graph(sinks, known_funcs):
     for fnid, entries in sinks.items():
         for e in entries:
             if e["type"] == "SINK_NETWORK":
+                fpath = e.get("file", "").replace("\\", "/").lower()
+                if any(p in fpath for p in ("/frontend/", "/client/", "/src/app/", "/public/")):
+                    continue
                 net_ops.append({
                     "function": e["label"],
                     "call": e["label"],

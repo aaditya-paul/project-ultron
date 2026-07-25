@@ -87,6 +87,9 @@ def check_network_requests(security_graph):
     findings = []
     net = security_graph["subgraphs"]["network"]
     for op in net.get("operations", []):
+        fpath = op.get("file", "").replace("\\", "/").lower()
+        if any(p in fpath for p in ("/frontend/", "/client/", "/src/app/", "/public/")):
+            continue
         findings.append({
             "rule": "exposed-network-request",
             "severity": "medium",
@@ -143,6 +146,9 @@ def check_ssrf(security_graph):
     findings = []
     for f in security_graph["flows"]:
         if f["sink_type"] == "SINK_NETWORK" and not f["validated"]:
+            fpath = f.get("file", "").replace("\\", "/").lower()
+            if any(p in fpath for p in ("/frontend/", "/client/", "/src/app/", "/public/")):
+                continue
             findings.append({
                 "rule": "ssrf-dynamic-url",
                 "severity": "medium",

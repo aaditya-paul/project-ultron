@@ -29,9 +29,13 @@ def run_ir_pipeline(target: str, ast_data: dict, verbose: bool = False):
     ir_modules = []
     total_ir_funcs = 0
 
+    from extractors.taint_engine import is_non_runtime_file
+
     candidate_files = [
         (fp, info) for fp, info in ast_data.get("files", {}).items()
         if info.get("language") in ("TypeScript", "JavaScript", "TSX")
+        and info.get("file_role", "RUNTIME") not in ("VENDOR", "BUILD", "TEST")
+        and not is_non_runtime_file(fp)
     ]
     total_files = len(candidate_files)
 

@@ -431,6 +431,32 @@ def parse_file(filepath, lang_name):
 
     return result
 
+def classify_file_role(relpath: str) -> str:
+    path_lower = relpath.replace("\\", "/").lower()
+    filename = os.path.basename(path_lower)
+    
+    if any(p in path_lower for p in ("/node_modules/", "/vendor/", "/assets/private/", "/dist/", "/build/output/")):
+        return "VENDOR"
+    if filename.endswith((".min.js", ".min.css", ".bundle.js")):
+        return "VENDOR"
+        
+    if any(p in path_lower for p in ("/cypress/", "/test/", "/tests/", "/__tests__/", "/spec/", "/specs/")):
+        return "TEST"
+    if any(fn in filename for fn in (".spec.", ".test.", "cypress.config", "jest.config", "playwright.config", "vitest.config")):
+        return "TEST"
+
+    if any(p in path_lower for p in ("/codefixes/", "/data/static/", "/static/codefixes/", "/fixtures/")):
+        return "FIXTURE"
+        
+    if filename in ("gruntfile.js", "gulpfile.js", "webpack.config.js", "vite.config.js", "vite.config.ts", "rollup.config.js", "next.config.js", "next.config.mjs"):
+        return "BUILD"
+
+    if any(p in path_lower for p in ("/frontend/", "/client/", "/src/app/", "/public/")):
+        return "RUNTIME_CLIENT"
+        
+    return "RUNTIME"
+
+
 def parse_repo(repo_path):
     _init_parsers()
     _init_ext_map()
@@ -462,6 +488,7 @@ def parse_repo(repo_path):
             relpath = os.path.relpath(filepath, repo_path)
             parsed = parse_file(filepath, lang)
             if parsed:
+                parsed["file_role"] = classify_file_role(relpath)
                 files_data[relpath] = parsed
                 total += 1
             else:
