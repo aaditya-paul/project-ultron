@@ -7,7 +7,7 @@ from banner import banner
 from cloner import clone_repo, list_repos, delete_repo, delete_all_repos, repo_exists, repo_path, extract_repo_name, get_remote_url
 from detector import analyze_project, show_detected_types, save_workspace_manifest, WORKSPACE_DIR
 from parser import parse_repo, save_ast, show_parse_summary
-from graph import load_ast, build_ir_dependency_graph, save_graph, render_graph, show_graph_summary
+from graph import load_ast, build_ir_dependency_graph, save_graph, render_graph, render_security_graph, show_graph_summary
 from security_graph import build_security_graph_from_ir, show_security_graph_summary
 from rules import show_findings, run_rules
 from help import show_help
@@ -173,6 +173,23 @@ def run_ir_analysis(repo_name, target, ir_modules, call_graph, taint_paths):
     print(f"  {DIM}[*]{RST} security graph saved -> {WHT}{spath}{RST}")
     show_security_graph_summary(security_graph)
 
+    # Security graph SVG (always generated, path always shown)
+    sec_out = os.path.join(out_dir, "security_graph.svg")
+    sec_vis = render_security_graph(security_graph, sec_out)
+    if sec_vis:
+        print(f"  {GRN}[+]{RST} security graph visualisation saved -> {WHT}{sec_vis}{RST}")
+
+    # If visualise flag is on, open SVGs in browser
+    if config.get("visualise", False) or os.environ.get("ULTRON_VISUALISE") == "1":
+        import webbrowser
+        for svg_name in ["dependency_graph.svg", "taint_graph.svg", "security_graph.svg"]:
+            svg_path = os.path.join(out_dir, svg_name)
+            if os.path.isfile(svg_path):
+                try:
+                    webbrowser.open(f"file://{os.path.abspath(svg_path)}")
+                except Exception:
+                    pass
+
 
 def save_and_report(repo_name, target, ast_data, ir_modules, call_graph, taint_paths):
     ast_path = save_ast(WORKSPACE_DIR, repo_name, ast_data)
@@ -295,6 +312,8 @@ def cmd_config(args):
         print(f"    {BOLD}verbose{RST}      : {WHT}{config.get('verbose', False)}{RST}")
         print(f"    {BOLD}visualise{RST}   : {WHT}{config.get('visualise', False)}{RST}")
         print(f"    {BOLD}use_llm{RST}      : {WHT}{config.get('use_llm', True)}{RST}")
+        print(f"    {BOLD}enable_cache{RST} : {WHT}{config.get('enable_cache', True)}{RST}")
+        print(f"    {BOLD}cache_only{RST}   : {WHT}{config.get('cache_only', False)}{RST}")
 
         api_keys = config.get("api_keys", {})
         configured = [k for k, v in api_keys.items() if v]
@@ -309,6 +328,14 @@ def cmd_config(args):
             for prov, model in models.items():
                 if prov in configured:
                     print(f"    {BOLD}{prov:<12}{RST} : {WHT}{model}{RST}")
+            rate_limits = config.get("rate_limits", {})
+            if rate_limits:
+                print(f"\n  {CYAN}{BOLD}RATE LIMITS{RST}")
+                print(f"  {DIM}──────────────────────────────────────────────────{RST}")
+                for prov, limits in rate_limits.items():
+                    rpm = limits.get("requests_per_minute", "?")
+                    concur = limits.get("max_concurrent", "?")
+                    print(f"    {BOLD}{prov:<12}{RST} : {WHT}{rpm}{RST} req/min, {WHT}{concur}{RST} concurrent")
 
         print(f"\n  {CYAN}{BOLD}SPECIFIC LLM PARTS OVERRIDES{RST}")
         print(f"  {DIM}──────────────────────────────────────────────────{RST}")

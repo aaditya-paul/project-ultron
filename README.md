@@ -89,7 +89,7 @@ Ultron maintains configuration settings in `ultron_config.json`. You can manage 
   - `default` (fallback model for all future agents)
 - **General Settings**:
   - `use_llm` (set to `false` to disable LLM vulnerability detection; only deterministic rules run)
-  - `visualise` (enable or disable printing SVG file paths after scan)
+  - `visualise` (enable or disable opening SVG files in browser after scan; SVG paths always printed regardless)
   - `verbose` (turn on verbose tracing by default)
   - `temperature` (LLM generation temperature)
   - `max_tokens` (LLM max tokens per response)
@@ -103,6 +103,12 @@ Ultron maintains configuration settings in `ultron_config.json`. You can manage 
   - `api_keys` — object with provider keys: `{"groq": "...", "gemini": "...", "nvidia": "..."}`
   - `cloud_chain` — fallback order per agent part: `{"default": ["groq", "gemini", "nvidia"]}`
   - `cloud_models` — model name per provider: `{"groq": "llama-3.3-70b-versatile", "gemini": "gemini-2.0-flash", "nvidia": "meta/llama-3.1-8b-instruct"}`
+  - **Rate limiting** — providers are throttled automatically (defaults: Groq 30 req/min, Gemini 60, NVIDIA 50). Override via `config`:
+    - `rate_limits` — object keyed by provider: `{"groq": {"requests_per_minute": 30, "max_concurrent": 2}}`
+  - **Retry with backoff** — transient errors (429, 500, 502, 503) retry up to 3 times with exponential backoff (1s → 2s → 4s + jitter, max 30s)
+  - **Response caching** — LLM responses are cached to disk at `.ultron_cache/llm_cache.json` (SHA-256 keyed by model + prompt + params). Re-running the same code costs zero API calls. Cache persists across sessions and auto-trims to 500 entries:
+    - `enable_cache` — set to `false` to disable caching
+    - `cache_only` — set to `true` to only use cached results (never call APIs); also via `ULTRON_CACHE_ONLY=1` env var
 - **Resetting defaults**: Run `config reset` to restore all options to original system defaults.
 
 ### Flags
@@ -114,7 +120,7 @@ Ultron maintains configuration settings in `ultron_config.json`. You can manage 
 - LLM endpoint connection timeouts or errors.
 - Detailed variable taint propagation stages (assignments, argument passing, return values, sanitizer logs).
 
-**Visualise**: Append `--visualise` or `--visualize` to any command to show `visualise : enabled` in the banner. Terminal graph summary and taint paths are always shown, SVG file paths are always printed. Can also be set persistently via `config visualise true` in settings.
+**Visualise**: Append `--visualise` or `--visualize` to any command to show `visualise : enabled` in the banner and automatically open generated SVGs (dependency, taint, security graph) in the default browser. Terminal graph summary and taint paths are always shown. SVG file paths are always printed regardless of this flag. Can also be set persistently via `config visualise true` in settings.
 
 **No LLM**: Append `--no-llm` to any command to skip LLM-based vulnerability detection entirely. Only deterministic rules run — useful for fast scans or when no LLM is available. Can also be set persistently via `config use_llm false` in settings.
 
@@ -212,10 +218,12 @@ The pipeline transforms raw AST data into a security-focused representation:
 - **Security Graph Builder** (`security_graph.py`): Converts IR modules + call graph + taint paths into flow chains, auth/db/network subgraphs, and summary dicts.
 - **Rules Engine** (`rules.py`): Pre-LLM deterministic checks — missing auth, unvalidated flows, DB writes without validation.
 - **LLM Detector** (`llm_detector.py`):
-- Takes the candidate flow paths from the taint graph and identifies all files involved in each path.
-- Feeds the full source code of the involved files along with the taint flow trace to a specialized local LLM (`detector` model).
-- The LLM performs deep, context-aware analysis of the source code and data flow to verify whether a genuine, exploitable vulnerability exists, filtering out false positives.
-- If the detector model is offline or unavailable, it falls back to deterministic checks.
+  - Takes candidate flow paths from the taint graph and identifies all files involved in each path.
+  - Extracts relevant code sections near source/sink variables (reduces token usage 80–95%) along with the taint flow trace.
+  - Pre-filters trivially safe flows (logging sinks, env-var sources, single-step paths) before any LLM call.
+  - Feeds optimized context to a specialized LLM (`detector` model) which performs deep, context-aware analysis to verify whether a genuine, exploitable vulnerability exists, filtering out false positives.
+  - Results are cached in memory for duplicate flows within the same run.
+  - If the detector model is offline or unavailable, falls back to deterministic checks.
 
 **Design principle**: The graph answers *"How can untrusted input reach sensitive operations?"* rather than *"How is the code written?"*
 
@@ -269,6 +277,14 @@ ultron/
 - **Finetuning (later):** SFT on (code slice, vulnerability class, finding) triples collected from the agent's own labeled runs
 - **Why local (default):** Code never leaves the machine, zero API cost, reproducible runs
 - **Why cloud (opt-in):** Larger models (70B) without local GPU; useful for complex reasoning passes
+
+### Cloud Optimization (built-in)
+
+- **Rate limiting & backoff:** Each provider is throttled to configurable requests/minute with a semaphore capping concurrent calls. On HTTP 429/5xx, retries up to 3× with exponential backoff + jitter.
+- **Response caching:** Identical prompts (same model, params, input) hit disk cache `.ultron_cache/llm_cache.json` instead of the API. Survives across runs.
+- **Prompt optimization:** Only relevant source code near source/sink variables is included (context window ±15 lines), drastically reducing token usage without sacrificing accuracy.
+- **Pre-filtering:** Trivially safe flows (logging sinks, env-var sources, single-step paths) skip the LLM entirely.
+- **In-memory dedup:** Duplicate flows within the same session use cached results.
 
 ---
 

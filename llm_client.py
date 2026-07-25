@@ -1,8 +1,12 @@
 import os
 import json
+import time
+import random
+import hashlib
 import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
+from threading import Semaphore, Lock
 
 CLOUD_PROVIDER_URLS = {
     "groq": "https://api.groq.com/openai/v1",
@@ -15,6 +19,150 @@ CLOUD_PROVIDER_NAMES = {
     "gemini": "Gemini",
     "nvidia": "NVIDIA",
 }
+
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ultron_cache")
+CACHE_FILE = os.path.join(CACHE_DIR, "llm_cache.json")
+
+# Provider rate limits (requests per minute) — conservative defaults
+# Users can override these in config under "rate_limits"
+PROVIDER_RATE_LIMITS = {
+    "groq": 30,
+    "gemini": 60,
+    "nvidia": 50,
+}
+
+PROVIDER_CONCURRENCY = {
+    "groq": 2,
+    "gemini": 3,
+    "nvidia": 2,
+}
+
+
+class LLMResponseCache:
+    def __init__(self):
+        self._lock = Lock()
+        self._cache = {}
+        self._dirty = False
+        self._load()
+
+    def _cache_path(self):
+        return CACHE_FILE
+
+    def _load(self):
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            if os.path.exists(CACHE_FILE):
+                with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                    self._cache = json.load(f)
+        except Exception:
+            self._cache = {}
+
+    def _save(self):
+        if not self._dirty:
+            return
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(self._cache, f, indent=2, ensure_ascii=False)
+            self._dirty = False
+        except Exception:
+            pass
+
+    def _make_key(self, model, prompt, temperature, max_tokens):
+        raw = f"{model}||{prompt}||{temperature}||{max_tokens}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+    def get(self, model, prompt, temperature, max_tokens):
+        key = self._make_key(model, prompt, temperature, max_tokens)
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is not None:
+                return entry.get("response")
+
+    def put(self, model, prompt, temperature, max_tokens, response):
+        if not response:
+            return
+        key = self._make_key(model, prompt, temperature, max_tokens)
+        with self._lock:
+            self._cache[key] = {
+                "response": response,
+                "model": model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "ts": time.time(),
+            }
+            self._dirty = True
+            # Keep cache under ~500 entries (LRU via simple trim)
+            if len(self._cache) > 500:
+                oldest = sorted(self._cache.keys(), key=lambda k: self._cache[k].get("ts", 0))[:100]
+                for k in oldest:
+                    del self._cache[k]
+
+    def flush(self):
+        self._save()
+
+
+class RateLimiter:
+    def __init__(self, rate_per_minute, max_concurrent):
+        self.min_interval = 60.0 / max(rate_per_minute, 1)
+        self._last_call = 0.0
+        self._sem = Semaphore(max_concurrent)
+        self._lock = Lock()
+
+    def acquire(self):
+        self._sem.acquire()
+        with self._lock:
+            now = time.time()
+            wait = self.min_interval - (now - self._last_call)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_call = time.time()
+
+    def release(self):
+        self._sem.release()
+
+
+_cache = LLMResponseCache()
+_rate_limiters = {}
+_rate_limiters_lock = Lock()
+
+
+def _get_rate_limiter(provider, config):
+    global _rate_limiters
+    with _rate_limiters_lock:
+        if provider not in _rate_limiters:
+            rpm = PROVIDER_RATE_LIMITS.get(provider, 30)
+            concur = PROVIDER_CONCURRENCY.get(provider, 2)
+            # Allow config overrides
+            user_limits = config.get("rate_limits", {})
+            if provider in user_limits:
+                rpm = user_limits[provider].get("requests_per_minute", rpm)
+                concur = user_limits[provider].get("max_concurrent", concur)
+            _rate_limiters[provider] = RateLimiter(rpm, concur)
+        return _rate_limiters[provider]
+
+
+def _retry_with_backoff(fn, max_retries=3, base_delay=1.0, max_delay=30.0):
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except urllib.error.HTTPError as e:
+            last_exc = e
+            if e.code in (429, 503, 502, 500):
+                if attempt >= max_retries:
+                    raise
+                delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
+                time.sleep(delay)
+            else:
+                raise
+        except urllib.error.URLError as e:
+            last_exc = e
+            if attempt >= max_retries:
+                raise
+            delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
+            time.sleep(delay)
+    raise last_exc
 
 def load_config():
     config_path = "ultron_config.json"
@@ -42,7 +190,10 @@ def load_config():
             "groq": "llama-3.3-70b-versatile",
             "gemini": "gemini-2.0-flash",
             "nvidia": "meta/llama-3.1-8b-instruct"
-        }
+        },
+        "rate_limits": {},
+        "enable_cache": True,
+        "cache_only": False
     }
     if os.path.exists(config_path):
         try:
@@ -310,6 +461,9 @@ class CloudLLMClient:
         self.cloud_chain = config.get("cloud_chain", {"default": ["groq", "gemini", "nvidia"]})
         self.cloud_models = config.get("cloud_models", {})
         self.model = self._resolve_model()
+        self._config = config
+        self._enable_cache = config.get("enable_cache", True)
+        self._cache_only = os.environ.get("ULTRON_CACHE_ONLY") == "1" or config.get("cache_only", False)
 
     def _resolve_model(self):
         chain = self._get_chain()
@@ -347,12 +501,16 @@ class CloudLLMClient:
         tokens = max_tokens or self.max_tokens
         model = self.cloud_models.get(provider, provider)
 
+        # If we're not actually streaming the response (only streams when ULTRON_DEBUG=1),
+        # never ask the API to stream — otherwise json.loads() will choke on SSE data.
+        actually_stream = stream and os.environ.get("ULTRON_DEBUG") == "1"
+
         body = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": tokens,
             "temperature": self.temperature,
-            "stream": stream
+            "stream": actually_stream
         }
 
         headers = {
@@ -368,16 +526,22 @@ class CloudLLMClient:
             headers=headers
         )
 
-        if stream and os.environ.get("ULTRON_DEBUG") == "1":
+        if actually_stream:
             return self._stream_provider(req)
 
+        # Rate-limit acquire with token bucket
+        limiter = _get_rate_limiter(provider, self._config)
+        limiter.acquire()
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                res_data = json.loads(resp.read().decode("utf-8"))
-                choices = res_data.get("choices", [])
-                if choices:
-                    return choices[0].get("message", {}).get("content", "").strip()
-                return ""
+            def do_request():
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+
+            res_data = _retry_with_backoff(do_request, max_retries=3)
+            choices = res_data.get("choices", [])
+            if choices:
+                return choices[0].get("message", {}).get("content", "").strip()
+            return ""
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="replace")[:200]
             if os.environ.get("ULTRON_DEBUG") == "1":
@@ -389,6 +553,8 @@ class CloudLLMClient:
                 from colors import RED, RST
                 print(f"  {RED}[DEBUG] {CLOUD_PROVIDER_NAMES.get(provider, provider)} error: {e}{RST}")
             return ""
+        finally:
+            limiter.release()
 
     def _stream_provider(self, req):
         from colors import GRN, RST
@@ -436,6 +602,23 @@ class CloudLLMClient:
                 print(f"  {RED}[DEBUG] no cloud providers configured (set api_keys in config){RST}")
             return ""
 
+        tokens = max_tokens or self.max_tokens
+
+        # Check cache first
+        if self._enable_cache:
+            cached = _cache.get(self.model, prompt, self.temperature, tokens)
+            if cached is not None:
+                if os.environ.get("ULTRON_DEBUG") == "1":
+                    from colors import DIM, RST
+                    print(f"  {DIM}[*] cache hit for provider {self.model}{RST}")
+                return cached
+
+        if self._cache_only:
+            if os.environ.get("ULTRON_DEBUG") == "1":
+                from colors import YLW, RST
+                print(f"  {YLW}[!]{RST} cache_only mode: skipping LLM call (no cache entry)")
+            return ""
+
         if os.environ.get("ULTRON_DEBUG") == "1":
             from colors import DIM, RST
             names = [CLOUD_PROVIDER_NAMES.get(p, p) for p in chain]
@@ -443,8 +626,11 @@ class CloudLLMClient:
 
         errors = []
         for i, provider in enumerate(chain):
-            result = self._call_provider(provider, prompt, max_tokens, stream)
+            result = self._call_provider(provider, prompt, tokens, stream)
             if result:
+                # Cache the successful response
+                if self._enable_cache:
+                    _cache.put(self.model, prompt, self.temperature, tokens, result)
                 return result
             msg = f"{CLOUD_PROVIDER_NAMES.get(provider, provider)} returned empty"
             errors.append(msg)
@@ -460,6 +646,13 @@ class CloudLLMClient:
             for err in errors:
                 print(f"    {RED}->{RST} {err}")
         return ""
+
+    def clear_cache(self):
+        global _cache
+        _cache = LLMResponseCache()
+
+    def flush_cache(self):
+        _cache.flush()
 
     def batch_complete(self, prompts: list[str], max_tokens=None) -> list[str]:
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:

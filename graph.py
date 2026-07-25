@@ -311,3 +311,155 @@ def show_graph_summary(graph_data):
         layers[l] = layers.get(l, 0) + 1
     if layers:
         print(f"    {DIM}[*]{RST} layers: {', '.join(f'{GRN}{k}{RST}={v}' for k, v in sorted(layers.items()))}")
+
+
+def render_security_graph(security_graph, output_path):
+    try:
+        import graphviz
+    except ImportError:
+        print(f"  {YLW}[!]{RST} graphviz not installed. install with: pip install graphviz")
+        return None
+
+    d = graphviz.Digraph(
+        name="security_graph",
+        format="svg",
+        graph_attr={
+            "rankdir": "TB",
+            "fontsize": "10",
+            "label": "Security Analysis Graph",
+            "dpi": "150",
+            "bgcolor": "#fafafa",
+        },
+        node_attr={
+            "shape": "box",
+            "style": "rounded,filled",
+            "fontsize": "9",
+        },
+        edge_attr={
+            "fontsize": "8",
+            "arrowsize": "0.6",
+        },
+    )
+
+    def sanitize(s):
+        s = s.replace("\\", "/")
+        s = s.replace(":", "-")
+        s = s.replace('"', "'")
+        s = s.replace("\n", " ")
+        s = s.replace("\r", "")
+        if len(s) > 50:
+            s = s[:47] + "..."
+        return s
+
+    flows = security_graph.get("flows", [])
+    subgraphs = security_graph.get("subgraphs", {})
+    summary = security_graph.get("summary", {})
+
+    # Summary cluster
+    with d.subgraph(name="cluster_summary") as s:
+        s.attr(label="Summary", style="filled", fillcolor="#f5f5f5", color="#9e9e9e")
+        s.node("summary_info", label=(
+            f"Sources: {summary.get('total_sources', 0)} | "
+            f"Sinks: {summary.get('total_sinks', 0)} | "
+            f"Routes: {summary.get('total_routes', 0)} | "
+            f"Flows: {summary.get('total_flows', 0)} | "
+            f"Unvalidated: {summary.get('unvalidated_flows', 0)}"
+        ), shape="note", fillcolor="#e8eaf6", color="#3949ab")
+
+    # Auth subgraph cluster
+    auth = subgraphs.get("auth", {})
+    if auth.get("protected") or auth.get("unprotected"):
+        with d.subgraph(name="cluster_auth") as s:
+            s.attr(label="Auth", style="filled", fillcolor="#fce4ec", color="#c62828")
+            for p in auth.get("protected", []):
+                pid = sanitize(f"auth_protected_{p['route']}")
+                s.node(pid, label=f"PROTECTED: {p['route']}", fillcolor="#c8e6c9", color="#2e7d32")
+            for r in auth.get("unprotected", []):
+                rid = sanitize(f"auth_unprotected_{r}")
+                s.node(rid, label=f"UNPROTECTED: {r}", fillcolor="#ffcdd2", color="#c62828")
+
+    # Database subgraph cluster
+    db = subgraphs.get("database", {})
+    db_ops = db.get("operations", [])
+    if db_ops:
+        with d.subgraph(name="cluster_database") as s:
+            s.attr(label=f"Database ({db.get('total', 0)} ops)", style="filled", fillcolor="#e8f5e9", color="#2e7d32")
+            for op in db_ops:
+                oid = sanitize(f"db_{op['source']}_{op['operation']}")
+                validated = op.get("validated", False)
+                label = f"{'[V]' if validated else '[U]'} {op['source']} -> {op['operation']}"
+                fill = "#c8e6c9" if validated else "#ffcc80"
+                s.node(oid, label=label, fillcolor=fill)
+
+    # Network subgraph cluster
+    net = subgraphs.get("network", {})
+    net_ops = net.get("operations", [])
+    if net_ops:
+        with d.subgraph(name="cluster_network") as s:
+            s.attr(label=f"Network ({net.get('total', 0)} ops)", style="filled", fillcolor="#fff3e0", color="#e65100")
+            for op in net_ops:
+                nid = sanitize(f"net_{op.get('function', '?')}")
+                s.node(nid, label=f"{op.get('function', '?')} ({op.get('file', '?')})", fillcolor="#ffe0b2")
+
+    # Flow paths
+    for flow in flows:
+        flow_id = flow.get("id", "flow")
+        source_label = flow.get("source", "?")
+        sink_label = flow.get("sink", "?")
+        sink_type = flow.get("sink_type", "?")
+        path_labels = flow.get("path_labels", [])
+
+        with d.subgraph(name=f"cluster_{sanitize(flow_id)}") as s:
+            s.attr(
+                label=f"{flow_id}: {source_label} -> {sink_label} ({sink_type})",
+                style="filled",
+                fillcolor="#f3e5f5",
+                color="#7b1fa2",
+                fontcolor="#4a148c"
+            )
+
+            # Source node
+            src_id = sanitize(f"{flow_id}_source")
+            s.node(src_id, label=f"SOURCE: {source_label}", fillcolor="#ffebee", color="#c62828", fontcolor="#c62828", penwidth="2")
+
+            prev = src_id
+            for step_label in path_labels[1:-1]:
+                step_id = sanitize(f"{flow_id}_{step_label}")
+                s.node(step_id, label=step_label, fillcolor="#e3f2fd", color="#1565c0")
+                s.edge(prev, step_id, color="#757575")
+                prev = step_id
+
+            # Sink node
+            validated = flow.get("validated", False)
+            sink_id = sanitize(f"{flow_id}_sink")
+            fill = "#c8e6c9" if validated else "#fff3e0"
+            border = "#2e7d32" if validated else "#ef6c00"
+            label = f"SINK: {sink_label}\n({sink_type})"
+            if validated:
+                label += "\n[SANITIZED]"
+            s.node(sink_id, label=label, fillcolor=fill, color=border, fontcolor=border, penwidth="2")
+            s.edge(prev, sink_id, color="#ef6c00", penwidth="1.5")
+
+    out_dir = os.path.dirname(output_path) or "."
+    dot_stem = os.path.splitext(os.path.basename(output_path))[0]
+
+    for p in [r"C:\Program Files\Graphviz\bin", r"C:\Program Files (x86)\Graphviz\bin"]:
+        dot_exe = os.path.join(p, "dot.exe")
+        if os.path.isfile(dot_exe):
+            os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
+            break
+
+    try:
+        d.render(filename=dot_stem, format="svg", directory=out_dir, quiet=True)
+        svg_path = os.path.join(out_dir, dot_stem + ".svg")
+        if os.path.isfile(svg_path):
+            return svg_path
+        return output_path
+    except Exception as e:
+        print(f"  {YLW}[!]{RST} graphviz security graph render failed: {e}")
+        dot_content = d.source
+        dot_fallback = os.path.join(out_dir, dot_stem + ".gv")
+        with open(dot_fallback, "w", encoding="utf-8") as f:
+            f.write(dot_content)
+        print(f"  {DIM}[*]{RST} DOT file saved -> {WHT}{dot_fallback}{RST}")
+        return dot_fallback
