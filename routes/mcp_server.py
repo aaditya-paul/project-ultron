@@ -233,10 +233,15 @@ def main():
     parser.add_argument("--port", type=int, default=8743, help="Port for SSE transport (default: 8743)")
     args = parser.parse_args()
 
+    # Render.com / cloud deployment: use $PORT env var and bind 0.0.0.0
+    on_render = "PORT" in os.environ
+    port = int(os.environ["PORT"]) if on_render else args.port
+    host = os.environ.get("HOST", "0.0.0.0" if on_render else "127.0.0.1")
+
     if args.sse:
-        mcp.settings.port = args.port
-        mcp.settings.host = "127.0.0.1"
-        print(f"Ultron MCP server starting on SSE http://127.0.0.1:{args.port}", file=sys.stderr)
+        mcp.settings.port = port
+        mcp.settings.host = host
+        print(f"Ultron MCP server starting on SSE http://{host}:{port}", file=sys.stderr)
         mcp.run(transport="sse")
     else:
         mcp.run(transport="stdio")
