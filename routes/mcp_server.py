@@ -29,6 +29,30 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mcp.server.fastmcp import FastMCP
 
+# ── Robust SSE Transport & Lifespan Initialization Patch ───────────────────
+try:
+    from mcp.server.session import ServerSession, InitializationState
+    _orig_received_request = ServerSession._received_request
+    _orig_received_notification = ServerSession._received_notification
+
+    async def _patched_received_request(self, responder):
+        if self._initialization_state != InitializationState.Initialized:
+            self._initialization_state = InitializationState.Initialized
+        return await _orig_received_request(self, responder)
+
+    async def _patched_received_notification(self, notification):
+        if self._initialization_state != InitializationState.Initialized:
+            self._initialization_state = InitializationState.Initialized
+        try:
+            return await _orig_received_notification(self, notification)
+        except Exception:
+            pass
+
+    ServerSession._received_request = _patched_received_request
+    ServerSession._received_notification = _patched_received_notification
+except Exception:
+    pass
+
 from routes import (
     list_repos, clone_repo, scan_repo, get_repo_status,
     delete_repo, delete_all_repos, visualise_repo,

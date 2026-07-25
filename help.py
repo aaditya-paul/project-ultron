@@ -1,130 +1,99 @@
 import os
-from colors import CYAN, BOLD, DIM, GRN, RST
+from colors import CYAN, BOLD, DIM, GRN, YLW, RST
 from llm_client import load_config
 
-def show_help():
+
+def get_help_text(use_ansi: bool = False) -> str:
     config = load_config()
     version = config.get("version", "8b")
     mode = os.environ.get("ULTRON_LLM_MODE") or config.get("llm_mode", "local")
-    print()
-    print(f"  {CYAN}{BOLD}ULTRON — multi-agent security analysis{RST}")
-    print(f"  {DIM}version: {version}  mode: {GRN}{mode}{RST}")
-    print()
-    print(f"  {CYAN}{BOLD}COMMANDS{RST}")
-    print(f"  {DIM}─────────────────────────────────────────────────────────────{RST}")
-    print(f"    {GRN}ultron <url>{RST} {DIM}[flags]{RST}")
-    print(f"      Clone a repository and run full security analysis.")
-    print()
-    print(f"    {GRN}ultron scan <name>{RST} {DIM}[flags]{RST}")
-    print(f"      Run analysis on an already-cloned repo.")
-    print()
-    print(f"    {GRN}ultron list{RST}")
-    print(f"      List all cloned repositories.")
-    print()
-    print(f"    {GRN}ultron delete <name>{RST}")
-    print(f"    {GRN}ultron delete --all{RST}")
-    print(f"      Delete a cloned repository (or all of them).")
-    print()
-    print(f"    {GRN}ultron visualise <name>{RST} {DIM}[flags]{RST}")
-    print(f"    {GRN}ultron visualize <name>{RST} {DIM}[flags]{RST}")
-    print(f"      Build and open dependency/taint/security SVGs in browser.")
-    print()
-    print(f"    {GRN}ultron config{RST}")
-    print(f"      Show the current configuration.")
-    print(f"    {GRN}ultron config <key> <value>{RST}")
-    print(f"      Set a configuration value (e.g. {GRN}config llm_mode cloud{RST}).")
-    print(f"    {GRN}ultron config reset{RST}")
-    print(f"      Restore all settings to defaults.")
-    print()
-    print(f"    {GRN}ultron --help{RST}")
-    print(f"      Show this help message.")
-    print()
-    print(f"  {CYAN}{BOLD}INTERACTIVE MODE{RST}")
-    print(f"  {DIM}─────────────────────────────────────────────────────────────{RST}")
-    print(f"    Inside the prompt, all commands work without the {GRN}ultron{RST} prefix.")
-    print(f"    {DIM}<url> [flags]{RST}     — clone and analyze")
-    print(f"    {DIM}scan <name> [flags]{RST} — run analysis on cloned repo")
-    print(f"    {DIM}list{RST}               — list cloned repos")
-    print(f"    {DIM}delete <name>{RST}       — delete a repo")
-    print(f"    {DIM}delete --all{RST}        — delete all repos")
-    print(f"    {DIM}config{RST}              — show config")
-    print(f"    {DIM}config <key> <val>{RST}  — set config value")
-    print(f"    {DIM}config reset{RST}        — reset to defaults")
-    print(f"    {DIM}help{RST}                — show this message")
-    print(f"    {DIM}exit / quit / bye{RST}   — exit the program")
-    print()
-    print(f"  {CYAN}{BOLD}FLAGS{RST}")
-    print(f"  {DIM}─────────────────────────────────────────────────────────────{RST}")
-    print(f"    {GRN}-v{RST}, {GRN}--verbose{RST}, {GRN}-d{RST}, {GRN}--debug{RST}")
-    print(f"      Show detailed tracing: LLM prompts, raw outputs,")
-    print(f"      taint propagation steps, pattern matching results.")
-    print()
-    print(f"    {GRN}--visualise{RST}, {GRN}--visualize{RST}")
-    print(f"      Open generated SVGs (dependency, taint, security)")
-    print(f"      in your default browser. SVG paths always printed.")
-    print()
-    print(f"    {GRN}--no-llm{RST}")
-    print(f"      Skip LLM vulnerability detection. Only deterministic")
-    print(f"      rules run. Useful for fast scans or no LLM available.")
-    print()
-    print(f"    {GRN}--mode local{RST} | {GRN}cloud{RST}")
-    print(f"      Override LLM mode for this single command.")
-    print()
-    print(f"  {CYAN}{BOLD}CONFIGURATION KEYS{RST}")
-    print(f"  {DIM}─────────────────────────────────────────────────────────────{RST}")
-    print(f"    {GRN}llm_mode{RST}          LLM provider mode: {DIM}local{RST} or {DIM}cloud{RST}")
-    print(f"    {GRN}use_llm{RST}           Enable/disable LLM detection: {DIM}true{RST} or {DIM}false{RST}")
-    print(f"    {GRN}verbose{RST}           Enable tracing by default: {DIM}true{RST} or {DIM}false{RST}")
-    print(f"    {GRN}visualise{RST}         Open SVGs in browser by default: {DIM}true{RST} or {DIM}false{RST}")
-    print(f"    {GRN}temperature{RST}       LLM generation temperature (default: {DIM}0.1{RST})")
-    print(f"    {GRN}max_tokens{RST}        Max tokens per LLM response (default: {DIM}512{RST})")
-    print(f"    {GRN}timeout{RST}           LLM API timeout in seconds (default: {DIM}30{RST})")
-    print(f"    {GRN}num_workers{RST}       Parallel worker threads (default: {DIM}3{RST})")
-    print(f"    {GRN}enable_cache{RST}      Cache LLM responses to disk: {DIM}true{RST} or {DIM}false{RST}")
-    print(f"    {GRN}cache_only{RST}        Only use cached results: {DIM}true{RST} or {DIM}false{RST}")
-    print(f"    {GRN}rate_limits{RST}       Per-provider throttling (req/min, concurrency)")
-    print()
-    print(f"    Model overrides (set with {GRN}config <part> <model>{RST}):")
-    print(f"    {DIM}detector{RST}  — model for vulnerability detection")
-    print(f"    {DIM}exploiter{RST} — model for exploitation (planned)")
-    print(f"    {DIM}reporter{RST}  — model for report generation (planned)")
-    print(f"    {DIM}default{RST}   — fallback model for all agents")
-    print()
-    print(f"  {CYAN}{BOLD}CLOUD MODE{RST}")
-    print(f"  {DIM}─────────────────────────────────────────────────────────────{RST}")
-    print(f"    Enable via {GRN}config llm_mode cloud{RST} or {GRN}--mode cloud{RST}.")
-    print(f"    Providers: {GRN}Groq{RST}, {GRN}Gemini{RST}, {GRN}NVIDIA{RST}")
-    print(f"    Set keys:  {GRN}config api_keys.groq <key>{RST}")
-    print(f"    Built-in optimizations:")
-    print(f"    • Rate limiting (configurable per-provider)")
-    print(f"    • Exponential backoff on 429/5xx (up to 3 retries)")
-    print(f"    • Response caching (SHA-256, persisted, auto-trims)")
-    print(f"    • Prompt optimization (only relevant code sections)")
-    print(f"    • Pre-filtering (trivially safe flows skip LLM)")
-    print(f"    • JSON retry (up to 2× on malformed responses)")
-    print()
-    print(f"  {CYAN}{BOLD}EXAMPLES{RST}")
-    print(f"  {DIM}─────────────────────────────────────────────────────────────{RST}")
-    print(f"    {DIM}# Basic scan{GRN}")
-    print(f"    ultron https://github.com/user/repo")
-    print()
-    print(f"    {DIM}# Verbose cloud scan with visualisation{GRN}")
-    print(f"    ultron -v --mode cloud --visualise https://github.com/user/repo")
-    print()
-    print(f"    {DIM}# Fast scan with no LLM{GRN}")
-    print(f"    ultron --no-llm https://github.com/user/repo")
-    print()
-    print(f"    {DIM}# Analyse an already-cloned repo{GRN}")
-    print(f"    ultron scan my-repo --verbose")
-    print()
-    print(f"    {DIM}# Switch to cloud mode persistently{GRN}")
-    print(f"    ultron config llm_mode cloud")
-    print()
-    print(f"  {CYAN}{BOLD}NOTES{RST}")
-    print(f"  {DIM}─────────────────────────────────────────────────────────────{RST}")
-    print(f"    • Existing repos trigger a pull prompt instead of re-clone.")
-    print(f"    • IR pipeline runs by default on all JS/TS files.")
-    print(f"    • SVG paths always printed; use {GRN}--visualise{RST} to open.")
-    print(f"    • {GRN}exit{RST}/{GRN}quit{RST}/{GRN}bye{RST} terminates the session.")
-    print(f"    • The program never exits on errors.")
-    print()
+
+    c_cyan = CYAN if use_ansi else ""
+    c_bold = BOLD if use_ansi else ""
+    c_dim = DIM if use_ansi else ""
+    c_grn = GRN if use_ansi else ""
+    c_ylw = YLW if use_ansi else ""
+    c_rst = RST if use_ansi else ""
+
+    lines = [
+        "",
+        f"  {c_cyan}{c_bold}ULTRON — multi-agent security analysis & remediation{c_rst}",
+        f"  {c_dim}version: {version}  mode: {c_grn}{mode}{c_rst}",
+        "",
+        f"  {c_cyan}{c_bold}COMMANDS{c_rst}",
+        f"  {c_dim}─────────────────────────────────────────────────────────────{c_rst}",
+        f"    {c_grn}ultron <url>{c_rst} {c_dim}[--fix] [flags]{c_rst}",
+        f"      Clone a repository and run full security analysis.",
+        "",
+        f"    {c_grn}ultron scan <name-or-directory>{c_rst} {c_dim}[--fix] [flags]{c_rst}",
+        f"      Run security analysis on an existing repo or local folder.",
+        f"      Pass --fix to invoke LLM Refactoring Agents to auto-patch vulnerable code.",
+        "",
+        f"    {c_grn}ultron install-hook{c_rst} {c_dim}[target_dir] [--no-fix]{c_rst}",
+        f"    {c_grn}ultron hook install{c_rst} {c_dim}[target_dir] [--no-fix]{c_rst}",
+        f"      Install built-in Git pre-commit hook into .git/hooks/pre-commit.",
+        f"      Git will automatically scan and LLM auto-fix code before every commit.",
+        "",
+        f"    {c_grn}ultron list{c_rst}",
+        f"      List all cloned repositories.",
+        "",
+        f"    {c_grn}ultron delete <name>{c_rst}",
+        f"    {c_grn}ultron delete --all{c_rst}",
+        f"      Delete a cloned repository (or all of them).",
+        "",
+        f"    {c_grn}ultron visualise <name>{c_rst} {c_dim}[flags]{c_rst}",
+        f"    {c_grn}ultron visualize <name>{c_rst} {c_dim}[flags]{c_rst}",
+        f"      Build and open dependency/taint/security SVGs in browser.",
+        "",
+        f"    {c_grn}ultron config{c_rst}",
+        f"      Show the current configuration.",
+        f"    {c_grn}ultron config <key> <value>{c_rst}",
+        f"      Set a configuration value (e.g. {c_grn}config llm_mode cloud{c_rst}).",
+        f"    {c_grn}ultron config reset{c_rst}",
+        f"      Restore all settings to defaults.",
+        "",
+        f"    {c_grn}ultron --help{c_rst}",
+        f"      Show this help message.",
+        "",
+        f"  {c_cyan}{c_bold}FLAGS{c_rst}",
+        f"  {c_dim}─────────────────────────────────────────────────────────────{c_rst}",
+        f"    {c_grn}--fix{c_rst}",
+        f"      Enable LLM Agent security remediation (Autofix mode: True).",
+        f"      Prompts specialized refactoring agents to rewrite vulnerable files.",
+        "",
+        f"    {c_grn}-v{c_rst}, {c_grn}--verbose{c_rst}, {c_grn}-d{c_rst}, {c_grn}--debug{c_rst}",
+        f"      Show detailed tracing: LLM prompts, raw outputs,",
+        f"      taint propagation steps, pattern matching results.",
+        "",
+        f"    {c_grn}--visualise{c_rst}, {c_grn}--visualize{c_rst}",
+        f"      Open generated SVGs in default browser.",
+        "",
+        f"    {c_grn}--no-llm{c_rst}",
+        f"      Skip LLM vulnerability detection (deterministic rules only).",
+        "",
+        f"    {c_grn}--mode local{c_rst} | {c_grn}cloud{c_rst}",
+        f"      Override LLM mode for this single command.",
+        "",
+        f"  {c_cyan}{c_bold}MCP SERVER TOOLS (ultron_mcp_server.py){c_rst}",
+        f"  {c_dim}─────────────────────────────────────────────────────────────{c_rst}",
+        f"    {c_grn}ultron_scan(target_dir){c_rst}           Full static security audit (JSON report)",
+        f"    {c_grn}ultron_auto_fix(target_dir){RST}       Audit + LLM Agent auto-remediation",
+        f"    {c_grn}ultron_get_report(target_dir){RST}     Markdown security report & SVG graph paths",
+        f"    {c_grn}ultron_install_git_hook(dir){c_rst}     Install pre-commit hook in .git/hooks",
+        f"    {c_grn}ultron_check_diff(target_dir){c_rst}     Incremental scan on uncommitted git diff",
+        f"    {c_grn}ultron_help(){c_rst}                    Show complete Ultron help & documentation menu",
+        "",
+        f"  {c_cyan}{c_bold}EXAMPLES{c_rst}",
+        f"  {c_dim}─────────────────────────────────────────────────────────────{c_rst}",
+        f"    {c_dim}# Scan and auto-fix local codebase with LLM Agents{c_grn}",
+        f"    ultron scan . --fix",
+        "",
+        f"    {c_dim}# Install Git pre-commit hook in current repo{c_grn}",
+        f"    ultron install-hook .",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def show_help():
+    print(get_help_text(use_ansi=True))

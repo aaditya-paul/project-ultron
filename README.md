@@ -61,7 +61,8 @@ Requires Python 3.10+, system `git`, and [Graphviz](https://graphviz.org/downloa
 | Command | Description |
 |---|---|
 | `ultron <url>` | Clone a repository and run full security analysis |
-| `ultron scan <name>` | Run analysis on an already-cloned repo |
+| `ultron scan <name-or-path> [--fix]` | Run security analysis on an existing repo or local folder (pass `--fix` to invoke LLM Auto-Fixer) |
+| `ultron install-hook [dir]` | Install built-in Git pre-commit hook into `.git/hooks/pre-commit` |
 | `ultron list` | List cloned repositories |
 | `ultron delete <name>` | Delete a cloned repository |
 | `ultron delete --all` | Delete all cloned repositories |
@@ -74,15 +75,43 @@ Requires Python 3.10+, system `git`, and [Graphviz](https://graphviz.org/downloa
 
 | Flag | Effect |
 |---|---|
+| `--fix` | Enable LLM Agent security remediation (Autofix mode: True). Prompts specialized refactoring agents to rewrite vulnerable files with secure code implementations while preserving functionality. Default is False. |
 | `-v` / `--verbose` / `-d` / `--debug` | Enable detailed tracing (LLM prompts, taint steps, raw outputs) |
 | `--visualise` / `--visualize` | Open SVGs in browser after scan (paths always printed) |
 | `--no-llm` | Skip LLM detection entirely (deterministic rules only) |
 | `--mode local` / `--mode cloud` | Override LLM mode for a single command |
 
-### Interactive Mode
+### Pre-Commit Security Hook Integration
 
-Inside the prompt, `list`, `scan`, `delete`, `visualise`, `config`, and `help` all work
-without the `ultron` prefix. Type `exit` / `quit` / `bye` to leave.
+Enforce automated security verification and optional auto-remediation before every `git commit`:
+
+Run in terminal:
+```bash
+python ultron.py install-hook .
+```
+Or ask your AI assistant: *"Install the Ultron pre-commit hook."*
+
+### Model Context Protocol (MCP) Integration
+
+Ultron provides a complete MCP server (`ultron_mcp_server.py`) exposing 5 built-in tools for direct integration with AI coding assistants (Copilot, Cursor, Antigravity, OpenCode, Claude Code):
+
+1. **`ultron_scan(target_dir)`**: Audits code for vulnerabilities and returns structured JSON findings.
+2. **`ultron_auto_fix(target_dir)`**: Audits code and invokes LLM Refactoring Agents to rewrite vulnerable files into secure code.
+3. **`ultron_get_report(target_dir)`**: Generates a full Markdown Security Analysis Report + taint path traces + visualization SVG paths.
+4. **`ultron_install_git_hook(target_dir, auto_fix)`**: Configures a built-in Git pre-commit security hook in the target repository.
+5. **`ultron_check_diff(target_dir)`**: Incremental delta security audit on modified/uncommitted `git diff` files.
+6. **`ultron_help()`**: Retrieves the full Ultron help & documentation menu directly within MCP.
+
+```json
+{
+  "mcpServers": {
+    "ultron-security": {
+      "command": "python",
+      "args": ["c:/Users/Aaditya Paul/Documents/Projects/Personal Projects/ultron/ultron_mcp_server.py"]
+    }
+  }
+}
+```
 
 ---
 

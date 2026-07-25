@@ -1,5 +1,5 @@
 import os
-from colors import RED, BOLD, DIM, WHT, GRN, RST
+from colors import RED, BOLD, DIM, WHT, GRN, RST, YLW
 from llm_client import load_config
 
 ULTRON = [
@@ -28,6 +28,11 @@ def banner():
 
     version = config.get("version", "8b")
     print(f"  {DIM}version :{RST} {version}")
+
+    import sys
+    do_fix = bool(sys.argv and "--fix" in sys.argv)
+    autofix_label = f"{GRN}true{RST}" if do_fix else f"{YLW}false{RST}"
+    print(f"  {DIM}autofix :{RST} {autofix_label}")
 
     if os.environ.get("ULTRON_DEBUG") == "1":
         print(f"  {DIM}verbose :{RST} {GRN}enabled{RST}")

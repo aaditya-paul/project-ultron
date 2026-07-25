@@ -122,6 +122,10 @@ def run_ir_analysis(repo_name, target, ir_modules, call_graph, taint_paths):
     config = load_config()
     mode = os.environ.get("ULTRON_LLM_MODE") or config.get("llm_mode", "local")
 
+    do_fix = "--fix" in sys.argv
+    autofix_str = f"{GRN}True{RST}" if do_fix else f"{YLW}False{RST}"
+    print(f"  {DIM}[*]{RST} Autofix mode: {autofix_str}")
+
     print(f"  {CYAN}[*]{RST} building security graph from IR data...")
     security_graph = build_security_graph_from_ir(ir_modules, call_graph, taint_paths)
 
@@ -228,6 +232,18 @@ def run_ir_analysis(repo_name, target, ir_modules, call_graph, taint_paths):
                 except Exception:
                     pass
 
+    # Optional Auto-Fixer Remediation (--fix)
+    if "--fix" in sys.argv:
+        from auto_fixer import UltronAutoFixer
+        print(f"\n  {CYAN}[*]{RST} running LLM Agent security remediation (--fix)...")
+        fixer = UltronAutoFixer(target, llm_client=detector_client)
+        fix_results = fixer.apply_fixes(findings)
+        success_count = sum(1 for r in fix_results if r.get("status") == "SUCCESS")
+        print(f"  {GRN}[+]{RST} LLM Auto-Fixer completed: {WHT}{success_count}/{len(fix_results)}{RST} file(s) refactored.")
+        for r in fix_results:
+            if r.get("status") == "SUCCESS":
+                print(f"    {GRN}[FIXED]{RST} {r.get('file')}: {r.get('description')}")
+
 
 def save_and_report(repo_name, target, ast_data, ir_modules, call_graph, taint_paths):
     ast_path = save_ast(WORKSPACE_DIR, repo_name, ast_data)
@@ -267,16 +283,22 @@ def cmd_clone(url):
 
 
 def cmd_scan(name):
-    if not repo_exists(name):
-        print(f"  {RED}[-]{RST} {WHT}{name}{RST} not found in clones/. clone it first.")
+    if os.path.isdir(name):
+        target = os.path.abspath(name)
+        repo_name = os.path.basename(target)
+    elif repo_exists(name):
+        target = repo_path(name)
+        repo_name = name
+    else:
+        print(f"  {RED}[-]{RST} {WHT}{name}{RST} not found in clones/ or as a local directory.")
         return
-    target = repo_path(name)
-    remote_url = get_remote_url(name) or f"clones/{name}"
+
+    remote_url = get_remote_url(repo_name) or f"local/{repo_name}"
     print(f"  {DIM}[*]{RST} switched to {WHT}{target}{RST}")
     print()
     analysis = analyze_project(target)
-    show_detected_types(name, analysis)
-    manifest = save_workspace_manifest(name, remote_url, analysis)
+    show_detected_types(repo_name, analysis)
+    manifest = save_workspace_manifest(repo_name, remote_url, analysis)
     print(f"  {DIM}[*]{RST} workspace saved -> {WHT}{manifest}{RST}")
 
     print(f"  {CYAN}[*]{RST} parsing AST...")
@@ -288,6 +310,49 @@ def cmd_scan(name):
     ir_modules, cg, taint_paths = run_ir_pipeline(target, ast_data, verbose=is_verbose)
 
     save_and_report(name, target, ast_data, ir_modules, cg, taint_paths)
+
+
+def install_git_hook(target_dir: str = ".", auto_fix: bool = True) -> tuple[bool, str]:
+    """Install Git pre-commit security hook in the target repository."""
+    abs_dir = os.path.abspath(target_dir)
+    git_dir = os.path.join(abs_dir, ".git")
+    if not os.path.isdir(git_dir):
+        return False, f"Not a Git repository: {abs_dir} (no .git folder found)"
+
+    hooks_dir = os.path.join(git_dir, "hooks")
+    os.makedirs(hooks_dir, exist_ok=True)
+    hook_file = os.path.join(hooks_dir, "pre-commit")
+
+    ultron_cli_path = os.path.abspath(__file__).replace("\\", "/")
+    fix_flag = " --fix" if auto_fix else ""
+
+    hook_content = f"""#!/bin/sh
+# Ultron Automated Pre-Commit Security Hook
+echo "--------------------------------------------------------"
+echo " 🔒 [Ultron] Running pre-commit security verification..."
+echo "--------------------------------------------------------"
+
+python "{ultron_cli_path}" scan .{fix_flag}
+
+ULTRON_EXIT_CODE=$?
+if [ $ULTRON_EXIT_CODE -ne 0 ]; then
+    echo "❌ [Ultron Gate Failed] Security issues found in commit."
+    exit 1
+fi
+
+echo "✅ [Ultron Gate Passed] Code is secure."
+exit 0
+"""
+    try:
+        with open(hook_file, "w", encoding="utf-8") as f:
+            f.write(hook_content)
+        try:
+            os.chmod(hook_file, 0o755)
+        except Exception:
+            pass
+        return True, f"Installed Git pre-commit hook in {hook_file} (auto_fix={auto_fix})"
+    except Exception as e:
+        return False, f"Failed to install hook: {e}"
 
 
 def cmd_visualise(name):
@@ -633,7 +698,7 @@ def main():
 
     banner()
 
-    valid_cmds = {"list", "scan", "config", "delete", "visualise", "visualize", "--help", "-h", "help"}
+    valid_cmds = {"list", "scan", "config", "delete", "visualise", "visualize", "install-hook", "hook", "--help", "-h", "help"}
     if len(sys.argv) > 1:
         arg = sys.argv[1]
         if arg.startswith("--") and arg not in valid_cmds:
@@ -642,13 +707,21 @@ def main():
         if arg in ("--help", "-h", "help"):
             show_help()
             sys.exit(0)
+        if arg in ("install-hook", "hook"):
+            target_dir = sys.argv[2] if len(sys.argv) > 2 else "."
+            ok, msg = install_git_hook(target_dir, auto_fix=("--no-fix" not in sys.argv))
+            if ok:
+                print(f"  {GRN}[+]{RST} {msg}")
+            else:
+                print(f"  {RED}[-]{RST} {msg}")
+            sys.exit(0)
         if arg == "list":
             list_repos()
         elif arg == "config":
             cmd_config(sys.argv[2:])
         elif arg == "scan":
             if len(sys.argv) < 3:
-                print(f"  {RED}[-]{RST} usage: ultron scan <repo-name>")
+                print(f"  {RED}[-]{RST} usage: ultron scan <repo-name-or-directory> [--fix]")
             else:
                 cmd_scan(sys.argv[2])
         elif arg == "delete":
