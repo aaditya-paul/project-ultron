@@ -1,6 +1,7 @@
 import os
 import re
 
+from ir import IRVar, IRAccess, IRCallExpr, IRLiteral, IRCall, IRAssign, IRBranch, IRReturn, IRFunction
 from colors import DIM, WHT, GRN, YLW, RED, RST
 
 ROUTE_FILE_PATTERNS = re.compile(r"(/api/|/routes/|route\.(ts|js|tsx)$|/pages/api/)", re.I)
@@ -29,6 +30,83 @@ def _fnid_for(fpath: str, fn_name: str) -> str:
     return f"{fpath}::{fn_name}"
 
 
+def _stmt_label(stmt) -> str:
+    if isinstance(stmt, IRCall):
+        return f"{stmt.target}(...)"
+    elif isinstance(stmt, IRAssign):
+        return f"{stmt.target} = ..."
+    elif isinstance(stmt, IRBranch):
+        return "if (...)"
+    elif isinstance(stmt, IRReturn):
+        return "return ..."
+    return stmt.type
+
+def _expr_label(expr) -> str:
+    if isinstance(expr, IRVar):
+        return expr.name
+    elif isinstance(expr, IRAccess):
+        parts = []
+        for p in expr.path:
+            if isinstance(p, str):
+                parts.append(p)
+            elif isinstance(p, IRVar):
+                parts.append(p.name)
+            else:
+                parts.append("?")
+        r = _expr_label(expr.root) if not isinstance(expr.root, IRVar) else expr.root.name
+        return f"{r}.{'.'.join(parts)}"
+    elif isinstance(expr, IRCallExpr):
+        return f"{expr.target}(...)"
+    elif isinstance(expr, IRLiteral):
+        return str(expr.value)[:40]
+    return "?"
+
+def _index_expr(expr, index, file_path, line):
+    if expr is None or not expr.id:
+        return
+    if expr.id not in index:
+        index[expr.id] = {"label": _expr_label(expr), "file_path": file_path, "line": line}
+    if isinstance(expr, IRAccess):
+        _index_expr(expr.root, index, file_path, line)
+    elif isinstance(expr, IRCallExpr):
+        _index_expr(expr.receiver, index, file_path, line)
+        for a in expr.args:
+            _index_expr(a, index, file_path, line)
+    elif isinstance(expr, IRVar) or isinstance(expr, IRLiteral):
+        pass
+
+def _index_stmt(stmt, index, file_path, line):
+    if stmt.id and stmt.id not in index:
+        index[stmt.id] = {"label": _stmt_label(stmt), "file_path": file_path, "line": line}
+    if isinstance(stmt, IRCall):
+        _index_expr(stmt.receiver, index, file_path, line)
+        for a in stmt.args:
+            _index_expr(a, index, file_path, line)
+    elif isinstance(stmt, IRAssign):
+        _index_expr(stmt.value, index, file_path, line)
+    elif isinstance(stmt, IRBranch):
+        _index_expr(stmt.condition, index, file_path, line)
+        for s in stmt.true_body:
+            _index_stmt(s, index, file_path, line)
+        for s in stmt.false_body:
+            _index_stmt(s, index, file_path, line)
+    elif isinstance(stmt, IRReturn):
+        _index_expr(stmt.value, index, file_path, line)
+
+def build_node_index(ir_modules):
+    """Build reverse index of node_id → {label, file_path, line} from IR modules."""
+    index = {}
+    for mod in ir_modules:
+        fp = mod.file_path
+        for fn in mod.functions:
+            fn_label = f"{fn.name}({', '.join(fn.params)})"
+            if fn.id not in index:
+                index[fn.id] = {"label": fn_label, "file_path": fp, "line": fn.line}
+            for stmt in fn.body:
+                _index_stmt(stmt, index, fp, getattr(stmt, 'line', 0))
+    return index
+
+
 def build_security_graph_from_ir(ir_modules, call_graph, taint_paths):
     """Build security_graph dict from IR data.
 
@@ -42,6 +120,7 @@ def build_security_graph_from_ir(ir_modules, call_graph, taint_paths):
     auth_funcs = {}
 
     tag_index = {}
+    node_to_fn_route = {}
     for mod in ir_modules:
         for tag in mod.semantic_tags:
             tag_index.setdefault(tag.kind, []).append((tag.node_id, mod.file_path))
@@ -56,10 +135,17 @@ def build_security_graph_from_ir(ir_modules, call_graph, taint_paths):
                 auth_funcs.setdefault(fnid, []).append({"label": fn.name, "file": fp})
             if any(v in name_lower for v in VALIDATION_INDICATORS):
                 validations.setdefault(fnid, []).append({"label": fn.name, "file": fp})
+            # Index all node IDs in this function for OP_AUTH tag resolution
+            for stmt in fn.body:
+                _index_node_to_fn(stmt, fnid, node_to_fn_route)
 
-    src_tags = tag_index.get("HTTP_BODY", []) + tag_index.get("HTTP_PARAMS", [])
+    source_keys = ["HTTP_BODY", "HTTP_PARAMS", "SOURCE_HTTP_BODY", "SOURCE_URL_PARAM",
+                   "SOURCE_URL_QUERY", "SOURCE_SESSION", "SOURCE_ENV"]
+    src_tags = []
+    for k in source_keys:
+        src_tags.extend(tag_index.get(k, []))
     for node_id, fpath in src_tags:
-        label = f"HTTP_BODY({node_id})"
+        label = f"SOURCE({node_id})"
         fnid = _fnid_for(fpath, label)
         sources.setdefault(fnid, []).append({"label": label, "file": fpath, "type": "SOURCE", "fnid": fnid})
 
@@ -104,9 +190,17 @@ def build_security_graph_from_ir(ir_modules, call_graph, taint_paths):
             "validated": tp.sanitized,
             "validators": tp.sanitizer_node_ids,
             "expressions": tp.path_node_ids,
+            "operations": tp.operation_tags,
         })
 
-    auth_graph = _build_auth_graph(routes, auth_funcs, {}, call_graph_edges)
+    # Build OP_AUTH node → fn mapping for inline auth detection
+    op_auth_node_to_fn = {}
+    for node_id, fpath in tag_index.get("OP_AUTH", []):
+        fnid = node_to_fn_route.get(node_id)
+        if fnid:
+            op_auth_node_to_fn[node_id] = fnid
+
+    auth_graph = _build_auth_graph(routes, auth_funcs, {}, call_graph_edges, op_auth_node_to_fn)
     db_graph = _build_db_graph(flows, {})
     network_graph = _build_network_graph(sinks, {})
 
@@ -137,7 +231,17 @@ def build_security_graph_from_ir(ir_modules, call_graph, taint_paths):
     }
 
 
-def _build_auth_graph(route_funcs, auth_funcs, known_funcs, call_graph):
+def _index_node_to_fn(stmt, fnid, acc):
+    """Recursively index statement node IDs to their containing function."""
+    acc[stmt.id] = fnid
+    if isinstance(stmt, IRBranch):
+        for s in stmt.true_body:
+            _index_node_to_fn(s, fnid, acc)
+        for s in stmt.false_body:
+            _index_node_to_fn(s, fnid, acc)
+
+
+def _build_auth_graph(route_funcs, auth_funcs, known_funcs, call_graph, op_auth_node_to_fn=None):
     protected = []
     unprotected = []
 
@@ -145,19 +249,35 @@ def _build_auth_graph(route_funcs, auth_funcs, known_funcs, call_graph):
         callees = call_graph.get(rfnid, set())
         has_auth = False
         auth_at = []
+
+        # Check call graph resolution (named auth functions)
         for c in callees:
             if c in auth_funcs:
                 has_auth = True
                 auth_at = auth_funcs[c]
                 break
+
+        # Also check inline OP_AUTH tags (e.g. direct auth() call in route handler)
+        if not has_auth and op_auth_node_to_fn:
+            for node_id, fnid in op_auth_node_to_fn.items():
+                if fnid == rfnid:
+                    has_auth = True
+                    auth_at.append({"label": "auth (inline)", "file": route.get("file", "")})
+                    break
+
         if has_auth:
             protected.append({
                 "route": route["label"],
                 "route_fnid": rfnid,
+                "file": route.get("file", ""),
                 "auth": [a["label"] for a in (auth_at or [])],
             })
         else:
-            unprotected.append(route["label"])
+            unprotected.append({
+                "route": route["label"],
+                "file": route.get("file", ""),
+                "fnid": rfnid,
+            })
 
     return {
         "protected": protected,

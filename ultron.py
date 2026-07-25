@@ -8,12 +8,12 @@ from cloner import clone_repo, list_repos, delete_repo, delete_all_repos, repo_e
 from detector import analyze_project, show_detected_types, save_workspace_manifest, WORKSPACE_DIR
 from parser import parse_repo, save_ast, show_parse_summary
 from graph import load_ast, build_ir_dependency_graph, save_graph, render_graph, render_security_graph, show_graph_summary
-from security_graph import build_security_graph_from_ir, show_security_graph_summary
-from rules import show_findings, run_rules
+from security_graph import build_security_graph_from_ir, build_node_index, show_security_graph_summary
+from rules import show_findings, show_findings_summary, run_rules
 from help import show_help
 from llm_client import LocalLLMClient, CloudLLMClient, load_config, create_llm_client, CLOUD_PROVIDER_NAMES
 from taint_graph import render_taint_graph
-from llm_detector import run_llm_detection
+from llm_detector import run_llm_detection, run_llm_auth_validation
 from extractors.js_ts import JsTsExtractor
 from extractors.resolver import SymbolResolver
 from extractors.call_graph import CallGraph
@@ -109,30 +109,11 @@ def run_ir_analysis(repo_name, target, ir_modules, call_graph, taint_paths):
 
     print(f"  {CYAN}[*]{RST} running deterministic rules...")
     findings = list(run_rules(security_graph))
-    show_findings(findings)
-    print_terminal_taint(security_graph)
-
-    print(f"  {CYAN}[*]{RST} generating dependency graph...")
-    dep_graph = build_ir_dependency_graph(ir_modules, call_graph)
-    gpath = save_graph(WORKSPACE_DIR, repo_name, dep_graph)
-    show_graph_summary(dep_graph)
-    if gpath:
-        print(f"  {DIM}[*]{RST} DOT file saved -> {WHT}{gpath}{RST}")
-
-    dep_out = os.path.join(out_dir, "dependency_graph.svg")
-    dep_vis = render_graph(dep_graph, dep_out)
-    if dep_vis:
-        print(f"  {GRN}[+]{RST} dependency visualisation saved -> {WHT}{dep_vis}{RST}")
-
-    if taint_paths:
-        taint_out = os.path.join(out_dir, "taint_graph.svg")
-        taint_vis = render_taint_graph(taint_paths, taint_out)
-        if taint_vis:
-            print(f"  {GRN}[+]{RST} taint propagation visualisation saved -> {WHT}{taint_vis}{RST}")
 
     # --- LLM initialization + detector (can be slow) ---
     use_llm = os.environ.get("ULTRON_NO_LLM") != "1"
     detector_client = None
+    auth_validated = None
 
     if use_llm:
         print(f"  {CYAN}[*]{RST} initializing {mode} LLM client for vulnerability detection...")
@@ -156,13 +137,47 @@ def run_ir_analysis(repo_name, target, ir_modules, call_graph, taint_paths):
                     print(f"  {GRN}[+]{RST} local LLM server active for vulnerability detection: {WHT}{detector_client.base_url}{RST} (model: {detector_client.model})")
             else:
                 print(f"  {YLW}[!]{RST} no LLM available — running deterministic rules only")
+
+    # When LLM is active, skip flow-based rule findings (LLM will analyze the same flows)
+    if detector_client and detector_client.is_available():
+        flow_rules = {"unvalidated-source-to-sink", "sql-injection-via-concat",
+                       "path-traversal", "ssrf-dynamic-url", "database-write-without-validation"}
+        findings = [f for f in findings if f.get("rule") not in flow_rules]
+        auth_validated = run_llm_auth_validation(security_graph, detector_client)
+        findings = [f for f in findings if (
+            f.get("rule") != "missing-authentication" or
+            f.get("route", "") in auth_validated
+        )]
     else:
         print(f"  {DIM}[*]{RST} LLM detection disabled (use_llm=false or --no-llm)")
 
+    show_findings(findings)
+    print_terminal_taint(security_graph)
+
+    print(f"  {CYAN}[*]{RST} generating dependency graph...")
+    dep_graph = build_ir_dependency_graph(ir_modules, call_graph)
+    gpath = save_graph(WORKSPACE_DIR, repo_name, dep_graph)
+    show_graph_summary(dep_graph)
+    if gpath:
+        print(f"  {DIM}[*]{RST} DOT file saved -> {WHT}{gpath}{RST}")
+
+    dep_out = os.path.join(out_dir, "dependency_graph.svg")
+    dep_vis = render_graph(dep_graph, dep_out)
+    if dep_vis:
+        print(f"  {GRN}[+]{RST} dependency visualisation saved -> {WHT}{dep_vis}{RST}")
+
+    if taint_paths:
+        taint_out = os.path.join(out_dir, "taint_graph.svg")
+        taint_vis = render_taint_graph(taint_paths, taint_out)
+        if taint_vis:
+            print(f"  {GRN}[+]{RST} taint propagation visualisation saved -> {WHT}{taint_vis}{RST}")
+
     if detector_client and detector_client.is_available():
-        llm_findings = run_llm_detection(repo_name, security_graph, detector_client, verbose=False)
+        llm_findings = run_llm_detection(repo_name, security_graph, detector_client, ir_modules=ir_modules, verbose=False)
         findings.extend(llm_findings)
-        show_findings(llm_findings)
+
+    node_index = build_node_index(ir_modules)
+    show_findings_summary(findings, security_graph, node_index, auth_validated)
 
     spath = os.path.join(out_dir, "security_graph.json")
     with open(spath, "w", encoding="utf-8") as f:

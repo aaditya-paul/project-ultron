@@ -37,6 +37,11 @@ SINK_NETWORK_PATTERNS = {
 
 SOURCE_TAG_KINDS = {
     "HTTP_BODY", "HTTP_PARAMS", "FILE_READ", "ENV_VAR", "COOKIE", "AUTH_HEADER",
+    "SOURCE_HTTP_BODY", "SOURCE_URL_PARAM", "SOURCE_URL_QUERY", "SOURCE_SESSION", "SOURCE_ENV",
+}
+
+OP_TAG_KINDS = {
+    "OP_COERCION", "OP_VALIDATION", "OP_AUTH",
 }
 
 SINK_TAG_KINDS = {
@@ -69,7 +74,7 @@ def detect_sink_type(call_target: str) -> Optional[tuple[str, float]]:
 
 @dataclass
 class TaintPath:
-    source_tag: str                # "HTTP_BODY"
+    source_tag: str                # "SOURCE_HTTP_BODY"
     source_node_id: str            # Node ID of the source
     sink_target: str               # "db.query"
     sink_node_id: str              # Node ID of the sink call
@@ -77,6 +82,7 @@ class TaintPath:
     file_path: str = ""
     sanitized: bool = False
     sanitizer_node_ids: list[str] = field(default_factory=list)
+    operation_tags: list[str] = field(default_factory=list)  # OP_COERCION, OP_VALIDATION, OP_AUTH
     confidence: float = 1.0
     sink_type: str = "SINK_UNKNOWN"
 
@@ -96,6 +102,7 @@ class TaintEngine:
         self._call_id_to_resolved_fn: dict[str, str] = {}  # call_node_id → fn_id
         self._source_nodes: dict[str, Tag] = {}             # node_id → Tag
         self._sanitizer_nodes: dict[str, Tag] = {}          # node_id → Tag (VALIDATION_GATE)
+        self._op_tag_nodes: dict[str, list[str]] = {}       # node_id → [OP_COERCION, ...]
         self._all_edges: list[Edge] = []
         self._edges_by_file: dict[str, list[Edge]] = {}     # file_path → edges
         self._sibling_explored_parents: set[str] = set()    # parent IDs whose siblings have been fully explored
@@ -114,6 +121,8 @@ class TaintEngine:
                     self._source_nodes[tag.node_id] = tag
                 elif tag.kind == "VALIDATION_GATE":
                     self._sanitizer_nodes[tag.node_id] = tag
+                if tag.kind in OP_TAG_KINDS:
+                    self._op_tag_nodes.setdefault(tag.node_id, []).append(tag.kind)
             for fn in mod.functions:
                 self._node_id_to_fn[fn.id] = fn
                 self._fn_id_to_module[fn.id] = mod
@@ -131,7 +140,7 @@ class TaintEngine:
             self._sibling_explored_parents.clear()
             result = self._backward_propagate(sink_node_id, file_path)
             if result:
-                for source_node_id, path_nodes, sanitized, sanitizers in result:
+                for source_node_id, path_nodes, sanitized, sanitizers, op_tags in result:
                     source_tag = self._source_nodes.get(source_node_id)
                     if source_tag:
                         paths.append(TaintPath(
@@ -143,6 +152,7 @@ class TaintEngine:
                             file_path=file_path,
                             sanitized=sanitized,
                             sanitizer_node_ids=sanitizers,
+                            operation_tags=op_tags,
                             confidence=0.85 if sanitized else 0.95,
                             sink_type=sink_type,
                         ))
@@ -207,10 +217,10 @@ class TaintEngine:
         depth: int = 0,
         visited: set | None = None,
         path: list[str] | None = None,
-    ) -> list[tuple[str, list[str], bool, list[str]]]:
+    ) -> list[tuple[str, list[str], bool, list[str], list[str]]]:
         """Walk backward through provenance edges from start_node_id.
 
-        Returns list of (source_node_id, path_node_ids, sanitized, sanitizer_ids).
+        Returns list of (source_node_id, path_node_ids, sanitized, sanitizer_ids, operation_tags).
         """
         if visited is None:
             visited = set()
@@ -223,12 +233,15 @@ class TaintEngine:
             return []
         visited.add(start_node_id)
 
-        results: list[tuple[str, list[str], bool, list[str]]] = []
+        results: list[tuple[str, list[str], bool, list[str], list[str]]] = []
+
+        # Collect operation tags for this node (OP_COERCION, OP_VALIDATION, OP_AUTH)
+        node_op_tags = self._op_tag_nodes.get(start_node_id, [])
 
         # Check if this node is a source
         source_tag = self._source_nodes.get(start_node_id)
         if source_tag:
-            results.append((start_node_id, list(reversed(path)), False, []))
+            results.append((start_node_id, list(reversed(path)), False, [], node_op_tags))
 
         # Check if this node is a sanitizer
         sanitizer_tag = self._sanitizer_nodes.get(start_node_id)
@@ -247,12 +260,14 @@ class TaintEngine:
                 for sub_result in self._backward_propagate(
                     src_id, file_path, depth + 1, visited, new_path
                 ):
-                    src_id2, p, sanitized_flag, sanitizers = sub_result
+                    src_id2, p, sanitized_flag, sanitizers, op_tags = sub_result
                     all_sanitizers = sanitizer_ids + sanitizers
+                    all_op_tags = list(set(node_op_tags + op_tags))
                     results.append((
                         src_id2, p,
                         is_sanitized or sanitized_flag,
                         all_sanitizers,
+                        all_op_tags,
                     ))
         elif outgoing:
             parent_ids = {e.target_id for e in outgoing}
@@ -269,12 +284,14 @@ class TaintEngine:
                     for sub_result in self._backward_propagate(
                         sib_id, file_path, depth + 1, visited, new_path
                     ):
-                        src_id2, p, sanitized_flag, sanitizers = sub_result
+                        src_id2, p, sanitized_flag, sanitizers, op_tags = sub_result
                         all_sanitizers = sanitizer_ids + sanitizers
+                        all_op_tags = list(set(node_op_tags + op_tags))
                         results.append((
                             src_id2, p,
                             is_sanitized or sanitized_flag,
                             all_sanitizers,
+                            all_op_tags,
                         ))
 
         # If edge-based propagation found nothing, try inter-procedural lookups
@@ -287,12 +304,14 @@ class TaintEngine:
                     for sub_result in self._backward_through_callee(
                         callee_fn, file_path, depth + 1, visited, path
                     ):
-                        src_id, p, sanitized_flag, sanitizers = sub_result
+                        src_id, p, sanitized_flag, sanitizers, op_tags = sub_result
                         all_sanitizers = sanitizer_ids + sanitizers
+                        all_op_tags = list(set(node_op_tags + op_tags))
                         results.append((
                             src_id, p,
                             is_sanitized or sanitized_flag,
                             all_sanitizers,
+                            all_op_tags,
                         ))
 
             # 2. Check if this node (a parameter/var) belongs to a function that is called
@@ -305,12 +324,14 @@ class TaintEngine:
                     for sub_result in self._backward_propagate(
                         call_node_id, caller_mod.file_path, depth + 1, visited, new_path
                     ):
-                        src_id, p, sanitized_flag, sanitizers = sub_result
+                        src_id, p, sanitized_flag, sanitizers, op_tags = sub_result
                         all_sanitizers = sanitizer_ids + sanitizers
+                        all_op_tags = list(set(node_op_tags + op_tags))
                         results.append((
                             src_id, p,
                             is_sanitized or sanitized_flag,
                             all_sanitizers,
+                            all_op_tags,
                         ))
 
         visited.discard(start_node_id)
@@ -375,7 +396,7 @@ class TaintEngine:
         depth: int,
         visited: set,
         path: list[str],
-    ) -> list[tuple[str, list[str], bool, list[str]]]:
+    ) -> list[tuple[str, list[str], bool, list[str], list[str]]]:
         """When a sink calls a function, walk backward through that function's return values."""
         results = []
         for stmt in callee_fn.body:

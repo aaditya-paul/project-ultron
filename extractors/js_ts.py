@@ -35,6 +35,15 @@ SINK_PATTERNS = {
 
 SOURCE_ROOTS = {"req", "request", "event", "ctx", "payload", "input", "body"}
 
+# Convention-based heuristics: detect operations by method/function shape, not by exhaustive lists.
+# These patterns describe what the code DOES, not whether it's safe.
+# The LLM decides security impact. These just surface semantics.
+# Conventions used:
+#   - Methods named "to*" (toString, toLowerCase) are type coercions
+#   - Functions named "parse*", "Number"/"String" are explicit type conversions
+#   - Methods like "test", "match" are regex/pattern checks
+#   - Functions with "auth"/"verify"/"token"/"session" in name are auth gates
+
 SEP = os.sep
 
 
@@ -695,28 +704,86 @@ class JsTsExtractor:
             elif target == pat:
                 mod.add_tag(f"SINK_{pat.upper()}", call.id)
                 break
-        # Tag HTTP_BODY on calls like req.body, req.json()
+        # Tag auth operations (convention-based: function name suggests auth/identity check)
+        if any(kw in target for kw in ("auth", "verify", "authorize", "login", "authenticate")) or \
+           target.startswith("get") and any(kw in target for kw in ("token", "session", "user")):
+            mod.add_tag("OP_AUTH", call.id)
+        # Tag HTTP sources on calls like req.body, req.json()
         if target in ("json", "body", "text", "formData"):
             if call.receiver:
                 if isinstance(call.receiver, IRVar) and call.receiver.name in SOURCE_ROOTS:
-                    mod.add_tag("HTTP_BODY", call.id)
+                    mod.add_tag("SOURCE_HTTP_BODY", call.id)
                 elif isinstance(call.receiver, IRAccess):
-                    if isinstance(call.receiver.root, IRVar) and call.receiver.root.name in SOURCE_ROOTS:
-                        mod.add_tag("HTTP_BODY", call.id)
+                    if isinstance(call.receiver.root, IRVar):
+                        tag = self._source_tag_for_access(call.receiver.root.name, call.receiver.path)
+                        if tag:
+                            mod.add_tag(tag, call.id)
+
+    def _source_tag_for_access(self, root_name: str, path: list) -> str | None:
+        """Determine source tag based on full access chain."""
+        if root_name in SOURCE_ROOTS:
+            if path and isinstance(path[0], str):
+                first = path[0].lower()
+                if first in ("body",):
+                    return "SOURCE_HTTP_BODY"
+                elif first in ("params",):
+                    return "SOURCE_URL_PARAM"
+                elif first in ("query",):
+                    return "SOURCE_URL_QUERY"
+                elif first in ("json",):
+                    return "SOURCE_HTTP_BODY"
+            return "SOURCE_HTTP_BODY"
+        if root_name == "session":
+            return "SOURCE_SESSION"
+        if root_name == "process" and path and path[0] == "env":
+            return "SOURCE_ENV"
+        return None
+
+    def _tag_operations(self, mod: IRModule, expr: IRCallExpr):
+        """Tag semantic operations on call expressions using convention-based heuristics."""
+        target = expr.target.lower()
+
+        # Coercion: methods starting with "to" (toString, toLowerCase) or named "trim"
+        if target.startswith("to") and len(target) > 2:
+            mod.add_tag("OP_COERCION", expr.id)
+            mod.add_tag("VALIDATION_GATE", expr.id)
+        elif target in ("trim", "trimstart", "trimend"):
+            mod.add_tag("OP_COERCION", expr.id)
+            mod.add_tag("VALIDATION_GATE", expr.id)
+        # Coercion: standalone type-coercion functions
+        elif target in ("number", "string", "boolean", "bigint") or target.startswith("parse"):
+            mod.add_tag("OP_COERCION", expr.id)
+            mod.add_tag("VALIDATION_GATE", expr.id)
+        # Validation: regex/pattern checks
+        elif target in ("test", "match", "exec"):
+            if expr.args:
+                mod.add_tag("OP_VALIDATION", expr.id)
+                mod.add_tag("VALIDATION_GATE", expr.id)
+        # Validation: schema validation (parse/safeParse/validate)
+        elif target in ("validate",) or target.endswith("parse") or target.endswith("schemacheck"):
+            mod.add_tag("OP_VALIDATION", expr.id)
+            mod.add_tag("VALIDATION_GATE", expr.id)
 
     def _tag_expr(self, mod: IRModule, expr):
         if isinstance(expr, IRAccess):
-            if isinstance(expr.root, IRVar) and expr.root.name in SOURCE_ROOTS:
-                mod.add_tag("HTTP_BODY", expr.id)
+            if isinstance(expr.root, IRVar):
+                tag = self._source_tag_for_access(expr.root.name, expr.path)
+                if tag:
+                    mod.add_tag(tag, expr.id)
         elif isinstance(expr, IRCallExpr):
             target = expr.target.lower()
-            # Tag HTTP_BODY on call patterns like req.json(), req.text(), etc.
+            # Tag HTTP sources on call patterns like req.json(), req.text(), etc.
             if target in ("json", "body", "text", "formData"):
                 if isinstance(expr.receiver, IRVar) and expr.receiver.name in SOURCE_ROOTS:
-                    mod.add_tag("HTTP_BODY", expr.id)
+                    mod.add_tag("SOURCE_HTTP_BODY", expr.id)
                 elif isinstance(expr.receiver, IRAccess):
-                    if isinstance(expr.receiver.root, IRVar) and expr.receiver.root.name in SOURCE_ROOTS:
-                        mod.add_tag("HTTP_BODY", expr.id)
+                    if isinstance(expr.receiver.root, IRVar):
+                        tag = self._source_tag_for_access(expr.receiver.root.name, expr.receiver.path)
+                        if tag:
+                            mod.add_tag(tag, expr.id)
+            # Tag operations
+            self._tag_operations(mod, expr)
+            # Tag sinks
             for pat in SINK_PATTERNS:
                 if pat.endswith(".*"):
                     prefix = pat[:-2]
