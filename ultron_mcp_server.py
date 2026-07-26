@@ -38,27 +38,56 @@ from ultron import run_ir_pipeline
 from security_graph import build_security_graph_from_ir
 from rules import run_rules
 from auto_fixer import UltronAutoFixer
+from llm_client import create_llm_client
+from llm_detector import run_llm_detection, run_llm_auth_validation
 
 mcp = FastMCP("Ultron Security Engine")
 
 
+def _audit_codebase(abs_path: str, verbose: bool = False):
+    """Run IR static taint pipeline and LLM vulnerability detection (when LLM active)."""
+    ast_data = parse_repo(abs_path)
+    if not ast_data:
+        return None, None, None, [], False
+
+    ir_modules, cg, taint_paths = run_ir_pipeline(abs_path, ast_data, verbose=verbose)
+    security_graph = build_security_graph_from_ir(ir_modules, cg, taint_paths)
+    findings = list(run_rules(security_graph))
+
+    detector_client = create_llm_client(part="detector")
+    llm_active = False
+    if detector_client and detector_client.is_available():
+        llm_active = True
+        repo_name = os.path.basename(abs_path) or "local"
+        flow_rules = {"unvalidated-source-to-sink", "sql-injection-via-concat",
+                       "path-traversal", "ssrf-dynamic-url", "database-write-without-validation"}
+        findings = [f for f in findings if f.get("rule") not in flow_rules]
+        auth_validated = run_llm_auth_validation(security_graph, detector_client)
+        findings = [f for f in findings if (
+            f.get("rule") != "missing-authentication" or
+            f.get("route", "") in (auth_validated or {})
+        )]
+        llm_findings = run_llm_detection(repo_name, security_graph, detector_client, ir_modules=ir_modules, verbose=verbose)
+        findings.extend(llm_findings)
+
+    return security_graph, ir_modules, detector_client, findings, llm_active
+
+
 @mcp.tool()
 def ultron_scan(target_dir: str = ".") -> str:
-    """Run full Ultron static security audit on a codebase directory and return structured vulnerability findings."""
+    """Run full Ultron security audit (Static IR Taint Analysis + LLM Vulnerability Verification Agent) on a codebase directory."""
     abs_path = os.path.abspath(target_dir)
     if not os.path.isdir(abs_path):
         return json.dumps({"error": f"Directory not found: {target_dir}"})
 
-    ast_data = parse_repo(abs_path)
-    if not ast_data:
+    security_graph, ir_modules, detector_client, findings, llm_active = _audit_codebase(abs_path)
+    if security_graph is None:
         return json.dumps({"error": "Failed to parse repository AST"})
-
-    ir_modules, cg, taint_paths = run_ir_pipeline(abs_path, ast_data, verbose=False)
-    security_graph = build_security_graph_from_ir(ir_modules, cg, taint_paths)
-    findings = list(run_rules(security_graph))
 
     summary = {
         "target_directory": abs_path,
+        "llm_detection_active": llm_active,
+        "llm_model": detector_client.model if llm_active and detector_client else "None (Static Rules Only)",
         "total_vulnerabilities": len(findings),
         "high_severity": sum(1 for f in findings if f.get("severity") == "high"),
         "medium_severity": sum(1 for f in findings if f.get("severity") == "medium"),
@@ -70,24 +99,21 @@ def ultron_scan(target_dir: str = ".") -> str:
 
 @mcp.tool()
 def ultron_auto_fix(target_dir: str = ".") -> str:
-    """Run Ultron security scan on a codebase and invoke LLM Refactoring Agents to auto-patch vulnerable files."""
+    """Run Ultron security scan and invoke LLM Refactoring Agents to auto-patch vulnerable files using report context."""
     abs_path = os.path.abspath(target_dir)
     if not os.path.isdir(abs_path):
         return json.dumps({"error": f"Directory not found: {target_dir}"})
 
-    ast_data = parse_repo(abs_path)
-    if not ast_data:
+    security_graph, ir_modules, detector_client, findings, llm_active = _audit_codebase(abs_path)
+    if security_graph is None:
         return json.dumps({"error": "Failed to parse repository AST"})
 
-    ir_modules, cg, taint_paths = run_ir_pipeline(abs_path, ast_data, verbose=False)
-    security_graph = build_security_graph_from_ir(ir_modules, cg, taint_paths)
-    findings = list(run_rules(security_graph))
-
-    fixer = UltronAutoFixer(abs_path)
+    fixer = UltronAutoFixer(abs_path, llm_client=detector_client)
     fix_results = fixer.apply_fixes(findings)
 
     summary = {
         "target_directory": abs_path,
+        "llm_refactoring_agent": detector_client.model if detector_client and detector_client.is_available() else "AST Regex Fallback",
         "total_findings": len(findings),
         "remediation_attempts": fix_results
     }
@@ -123,7 +149,7 @@ def ultron_remove_git_hook(target_dir: str = ".") -> str:
 
 @mcp.tool()
 def ultron_check_diff(target_dir: str = ".") -> str:
-    """Run incremental delta security audit on modified/uncommitted git diff files in the target codebase."""
+    """Run incremental delta security audit (Static IR + LLM Agent) on modified/uncommitted git diff files in the target codebase."""
     abs_path = os.path.abspath(target_dir)
     if not os.path.isdir(abs_path):
         return json.dumps({"error": f"Directory not found: {target_dir}"})
@@ -134,13 +160,9 @@ def ultron_check_diff(target_dir: str = ".") -> str:
     except Exception:
         changed_files = []
 
-    ast_data = parse_repo(abs_path)
-    if not ast_data:
+    security_graph, ir_modules, detector_client, all_findings, llm_active = _audit_codebase(abs_path)
+    if security_graph is None:
         return json.dumps({"error": "Failed to parse repository AST"})
-
-    ir_modules, cg, taint_paths = run_ir_pipeline(abs_path, ast_data, verbose=False)
-    security_graph = build_security_graph_from_ir(ir_modules, cg, taint_paths)
-    all_findings = list(run_rules(security_graph))
 
     diff_findings = [
         f for f in all_findings
@@ -149,6 +171,7 @@ def ultron_check_diff(target_dir: str = ".") -> str:
 
     return json.dumps({
         "target_directory": abs_path,
+        "llm_detection_active": llm_active,
         "changed_files_count": len(changed_files),
         "changed_files": changed_files,
         "total_diff_findings": len(diff_findings),
@@ -158,18 +181,14 @@ def ultron_check_diff(target_dir: str = ".") -> str:
 
 @mcp.tool()
 def ultron_get_report(target_dir: str = ".") -> str:
-    """Generate and return a full Markdown Security Analysis Report with data-flow taint paths, architecture subgraphs, and SVG graph file locations."""
+    """Generate and return a full Markdown Security Analysis Report (Static IR + LLM Verification) with taint paths and SVG file locations."""
     abs_path = os.path.abspath(target_dir)
     if not os.path.isdir(abs_path):
         return json.dumps({"error": f"Directory not found: {target_dir}"})
 
-    ast_data = parse_repo(abs_path)
-    if not ast_data:
+    security_graph, ir_modules, detector_client, findings, llm_active = _audit_codebase(abs_path)
+    if security_graph is None:
         return json.dumps({"error": "Failed to parse repository AST"})
-
-    ir_modules, cg, taint_paths = run_ir_pipeline(abs_path, ast_data, verbose=False)
-    security_graph = build_security_graph_from_ir(ir_modules, cg, taint_paths)
-    findings = list(run_rules(security_graph))
 
     repo_name = os.path.basename(abs_path) or "local_repo"
     graph_dir = os.path.join(os.path.dirname(__file__), "workspace", repo_name, "graph")
@@ -184,6 +203,7 @@ def ultron_get_report(target_dir: str = ".") -> str:
     report_lines = [
         f"# ULTRON Security Analysis Report",
         f"**Target Directory**: `{abs_path}`",
+        f"**LLM Vulnerability Verification**: `{'ACTIVE (' + detector_client.model + ')' if llm_active and detector_client else 'Disabled (Deterministic Rules Only)'}`",
         f"**Total Findings**: {len(findings)} (High: {sum(1 for f in findings if f.get('severity')=='high')}, Medium: {sum(1 for f in findings if f.get('severity')=='medium')}, Low: {sum(1 for f in findings if f.get('severity')=='low')})",
         "",
         "## Subgraph Architecture Summary",
@@ -214,6 +234,7 @@ def ultron_get_report(target_dir: str = ".") -> str:
 
     return json.dumps({
         "target_directory": abs_path,
+        "llm_detection_active": llm_active,
         "markdown_report": "\n".join(report_lines),
         "visualizations": svg_files,
         "total_findings": len(findings),
