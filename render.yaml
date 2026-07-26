@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: ultron-mcp-server
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python ultron_mcp_server.py
+    envVars:
+      - key: MCP_TRANSPORT
+        value: sse
+      - key: PYTHONUNBUFFERED
+        value: "1"

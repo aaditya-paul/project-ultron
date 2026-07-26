@@ -250,4 +250,15 @@ def ultron_help() -> str:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    transport = os.environ.get("MCP_TRANSPORT", "").lower()
+    port_env = os.environ.get("PORT")
+
+    if port_env or transport == "sse":
+        port = int(port_env) if port_env else 8000
+        mcp.settings.host = "0.0.0.0"
+        mcp.settings.port = port
+        print(f"Starting Ultron MCP Server in SSE mode on http://0.0.0.0:{port}...")
+        mcp.run(transport="sse")
+    else:
+        mcp.run(transport="stdio")
+
